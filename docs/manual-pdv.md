@@ -28,6 +28,14 @@ A real directory in the slot makes `manage.sh` rsync a clone instead, and commit
 
 An agent session started with `PENPOT_MCP_PORT` and `SERENA_MCP_PORT` set reaches the instance in the slot: the ports are `4401 + N × 10000` and `14181 + N × 10000`. `.mcp.json` reads those variables and falls back to ws0, so a session without them talks to ws0 whatever the worktree.
 
+## Instances share one database
+
+Each workspace gets its own container, home volume, published ports, Redis index, and tenant. It does not get its own database or object store: `PENPOT_DATABASE_URI` points at one PostgreSQL database and the S3 object store is shared, so a user, a project, or a migration created in one instance is visible from every instance.
+
+Every backend migrates that database at boot. Migration steps are keyed by module and step name, so an older branch starts normally against a schema that a newer branch migrated. The hazard is a later upstream migration that reuses a number with different SQL, because the step is skipped when the name already has a row. Watch for it when a rebase brings new migration files.
+
+The test database is the exception: the instance overrides name `penpot_test` on ws0 and `penpot_test_wsN` on wsN.
+
 ## A service is a window, and storybook also names a compile target
 
 `--services` takes a positive list. Each name is one window, and the windows appear in the order `frontend`, `storybook`, `exporter`, `backend`, `mcp`, `serena`. The default set is everything `start-tmux.sh` creates for the current mode, so a bare `pdv run` is the upstream instance.
