@@ -1,0 +1,567 @@
+#!/usr/bin/env bash
+# pdv — the Penpot development-environment manager.
+#
+# A thin dispatcher over the checkout's manage.sh: every command pdv does not
+# own falls through to manage.sh verbatim, so upstream changes cost nothing
+# here. pdv owns the instance bring-up with a service selection, the JVM heap
+# caps, a cache-preserving frontend watcher, failure reports that need no
+# attach, and the stale-network escape hatch.
+#
+# Usage: pdv <command> [options]   (pdv help prints the command list)
+#
+# Instance: a `--ws N` pair anywhere selects the wsN instance (default ws0),
+# validated against manage.sh's PENPOT_MAX_WS_INDEX.
+# Repo: --repo PATH, else $PENPOT_REPO, else the checkout the caller stands in,
+# else ~/Code/penpot.
+# Logging: DEVENV_VERBOSE=0 for terse output; every mutation prints what it
+# does, and with VERBOSE=1 also why (∵) and what follows (⇒).
+
+set -euo pipefail
+
+PDV_SELF=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+. "$PDV_SELF/lib/pdv-core.sh"
+. "$PDV_SELF/lib/pdv-services.sh"
+
+CALLER_DIR=$PWD
+
+# ------------------------------------------------------------------ usage
+usage() {
+  cat <<'EOF'
+pdv — the Penpot development-environment manager.
+
+Usage: pdv <command> [options]
+
+Every verb accepts --ws N anywhere in its arguments to select the instance
+(default 0), and --repo PATH to name the checkout.
+
+Instances
+  run     [--services LIST] [--only-backend] [--clean] [--recreate]
+          [--java-opts OPTS] [--agentic] [--attach] [--gpu] [--sync]
+          [--serena-context CTX] [--opencode-config-dir DIR]
+          [--git-user-name NAME] [--git-user-email EMAIL] [-e KEY=VAL]
+          Bring a workspace up with the requested service windows.
+  start   [--services LIST | --watchers] [--java-opts OPTS] [--clean]
+          Start windows of a running instance (or restart stopped ones).
+  stop    [--services LIST | --watchers] | [--all]
+          Stop service windows of a running instance; without a selector,
+          stop the instance itself.
+  attach  Attach to the instance's tmux session.
+  status  Every instance with its state, ports, tree, and window set; a
+          broken instance gets its state and a logs tail, never an attach.
+  logs    Follow the instance's container log.
+
+Services (comma list, default: frontend,storybook,exporter,backend,
+          plus mcp,serena with --agentic)
+  frontend   shadow-cljs watcher over main and worker
+  storybook  Storybook window and the storybook compile target (needs frontend)
+  exporter   the exporter watcher and its service pane
+  backend    ./scripts/start-dev
+  mcp        the MCP server window
+  serena     the Serena window
+  --watchers is the frontend,storybook,exporter shorthand.
+  --only-backend is the backend selector by its old name.
+
+Policy flags
+  --java-opts OPTS   heap/options carried in _JAVA_OPTIONS and JAVA_OPTS
+                     (default: "-Xmx768m -Xms50m"; empty means uncapped).
+                     DEVENV_JAVA_OPTS sets the same value.
+  --clean            run the upstream cache clears and wasm rebuild on every
+                     frontend start. Default: keep the caches and build wasm
+                     only when its artifact is missing.
+  --recreate         remove the main container before composing up, keeping
+                     every volume.
+
+Instance verbs
+  acl [tree] | tune | slim [args] | fatten [args] | jobs [n] | report
+  repl [args] | testjvm <cmd> | eval [opts]
+
+Anything else is manage.sh verbatim: pdv <command> [args…] runs
+<checkout>/manage.sh <command> [args…].
+
+Environment
+  --repo PATH             checkout to act on (also PENPOT_REPO or PDV_REPO)
+  PENPOT_REPO, PDV_REPO   checkout to act on, lower precedence than --repo
+  DEVENV_JAVA_OPTS        heap cap, same as --java-opts
+  DEVENV_VERBOSE=0        terse output (actions and warnings only)
+
+Debug
+  plan [same service flags]   print the window plan, one
+                              index<TAB>window<TAB>pane<TAB>command per pane
+EOF
+}
+
+# ------------------------------------------------------- shared flag parsing
+# Service selection shared by run, start, stop and plan.
+AGENTIC=false
+CLEAN=false
+SERVICES_SPEC=""
+PDV_JAVA_OPTS_GIVEN=false
+PDV_JAVA_OPTS=""
+
+take_service_flags() {
+  local a
+  local -a keep=()
+  while [ "$#" -gt 0 ]; do
+    a="$1"; shift
+    case "$a" in
+      --services)    if [ "$#" -lt 1 ]; then svc_usage "--services needs a value"; fi
+                     SERVICES_SPEC="$1"; shift ;;
+      --services=*)  SERVICES_SPEC="${a#--services=}" ;;
+      --only-backend) SERVICES_SPEC="backend" ;;
+      --watchers)    SERVICES_SPEC="frontend,storybook,exporter" ;;
+      --agentic)     AGENTIC=true ;;
+      --clean)       CLEAN=true ;;
+      --java-opts)   if [ "$#" -lt 1 ]; then svc_usage "--java-opts needs a value (use --java-opts '' to run uncapped)"; fi
+                     PDV_JAVA_OPTS_GIVEN=true; PDV_JAVA_OPTS="$1"; shift ;;
+      --java-opts=*) PDV_JAVA_OPTS_GIVEN=true; PDV_JAVA_OPTS="${a#--java-opts=}" ;;
+      *)             keep+=("$a") ;;
+    esac
+  done
+  REST=(${keep[@]+"${keep[@]}"})
+}
+
+load_selection() {
+  local spec="$SERVICES_SPEC"
+  if [ -z "$spec" ]; then spec=$(default_services); fi
+  select_services "$spec"
+  resolve_cap
+}
+
+# ------------------------------------------------------------------- run
+cmd_run() {
+  local attach=false gpu=false sync=false recreate=false
+  local serena_context="desktop-app" git_name="" git_email="" opencode_dir=""
+  local -a extra_env=()
+  take_service_flags "$@"
+  local -a args=(${REST[@]+"${REST[@]}"})
+  local i=0 a
+  while [ "$i" -lt "${#args[@]}" ]; do
+    a="${args[$i]}"
+    case "$a" in
+      --attach)     attach=true ;;
+      --gpu)        gpu=true ;;
+      --sync)       sync=true ;;
+      --recreate)   recreate=true ;;
+      --serena-context) i=$((i+1)); serena_context="${args[$i]:-}" ;;
+      --opencode-config-dir) i=$((i+1)); opencode_dir="${args[$i]:-}" ;;
+      --git-user-name)  i=$((i+1)); git_name="${args[$i]:-}" ;;
+      --git-user-email) i=$((i+1)); git_email="${args[$i]:-}" ;;
+      -e)           i=$((i+1)); extra_env+=(-e "${args[$i]:-}") ;;
+      -e*)          extra_env+=(-e "${a#-e}") ;;
+      --services|--services=*|--only-backend|--watchers|--agentic|--clean|--java-opts|--java-opts=*)
+                    : ;;   # consumed by take_service_flags
+      *)            svc_usage "run: unknown argument '$a' (pdv help shows the full surface)" ;;
+    esac
+    i=$(( i + 1 ))
+  done
+
+  manage_load
+  load_selection
+  require_storybook_pairing
+  if in_selection mcp; then AGENTIC=true; fi
+  if in_selection serena; then AGENTIC=true; fi
+  SERENA_CONTEXT="$serena_context"
+
+  if [ "$WS" = "ws0" ] && $sync; then
+    die "run: --sync is not allowed on ws0 (the live checkout is the source)"
+  fi
+
+  # The same pre-flight manage.sh makes: without config.js the frontend never
+  # enables MCP, so an agentic instance would look up but behave inert.
+  if $AGENTIC; then
+    local cfg="frontend/resources/public/js/config.js"
+    if [ ! -f "$ROOT/$cfg" ]; then
+      cat >&2 <<EOF
+[pdv] $cfg is missing in $ROOT.
+Create it before running with --agentic. The file is gitignored, read directly
+from the checkout on ws0 and copied into a wsN workspace on its first sync.
+Without it the frontend never sets enable-mcp and an agent cannot drive Penpot.
+Minimal content:
+  var penpotFlags = "enable-mcp";
+EOF
+      exit 1
+    fi
+  fi
+
+  [ -n "$git_name" ]  || git_name=$(git config user.name 2>/dev/null || true)
+  [ -n "$git_email" ] || git_email=$(git config user.email 2>/dev/null || true)
+
+  # --recreate: compose reuses a container by name even when it is a zombie on
+  # a dead network. Removing it is the escape hatch; volumes are untouched.
+  if $recreate && container_exists "$CTR"; then
+    say "recreate: removing $CTR (volumes are preserved)"
+    why "compose reuses a container by name, so a networkless zombie would be re-launched as-is"
+    docker rm -f "$CTR" >/dev/null
+  fi
+
+  if container_running "$CTR"; then
+    say "run: $CTR is already up — not restarting it"
+    tune_if_available
+    start_selected
+    finish_hints
+    if $attach; then attach_now; fi
+    return 0
+  fi
+
+  if [ "$WS" != "ws0" ]; then ws_briefing; fi
+
+  say "pre-start: devenv-acl"
+  why "rootless Docker: the container user cannot write a tree the host user owns until it is granted an ACL"
+  if [ -x "$ROOT/.devenv/devenv-acl" ]; then
+    local tree="$ROOT"
+    [ "$WS_INDEX" = 0 ] || tree="$PENPOT_WORKSPACES_DIR/$WS"
+    "$ROOT/.devenv/devenv-acl" "$tree" || warn "devenv-acl failed (non-fatal); watch tabs fail with EACCES if the container user cannot write $tree"
+  else
+    vsay "no ACL helper in $ROOT — skipping the grant"
+  fi
+
+  devenv_gpu=$gpu
+  if $gpu; then check-devenv-gpu-support || exit 1; fi
+
+  say "pull: devenv image"
+  pull-devenv-if-not-exists
+  say "network + shared infra"
+  ensure-devenv-network
+  ensure-infra-up
+  ensure-instance-test-database "$WS"
+
+  if [ "$WS" != "ws0" ]; then
+    local workspace
+    workspace=$(workspace-path "$WS")
+    if [ ! -d "$workspace" ]; then
+      say "[$WS] workspace $workspace does not exist; initial sync"
+      sync=true
+    fi
+    if $sync; then sync-workspace "$WS"; fi
+  fi
+
+  if $AGENTIC; then write-instance-mcp-configs "$WS"; fi
+
+  if [ -n "$opencode_dir" ]; then
+    PENPOT_OPENCODE_CONFIG_DIR=$(parse-opencode-config-dir "$opencode_dir") || exit 1
+    export PENPOT_OPENCODE_CONFIG_DIR
+    say "opencode config: $PENPOT_OPENCODE_CONFIG_DIR -> ~/.config/opencode"
+  fi
+
+  say "up: $CTR"
+  instance-compose "$WS" up -d main
+  wait_for_main
+
+  docker exec "$CTR" sudo chown penpot:users /home/penpot 2>/dev/null || true
+  if [ -n "$git_name" ]; then
+    docker exec "$CTR" sudo -u penpot git config --global user.name "$git_name" || true
+  fi
+  if [ -n "$git_email" ]; then
+    docker exec "$CTR" sudo -u penpot git config --global user.email "$git_email" || true
+  fi
+
+  launch_windows
+  say "waiting for tmux session '$SESSION' in $CTR (≤120 s)"
+  wait_session
+  tune_if_available
+  finish_hints
+
+  if $attach; then
+    attach_now
+  fi
+}
+
+# Container state and a logs tail, the way the light launcher reports it.
+wait_for_main() {
+  local deadline=$(( SECONDS + 120 )) state
+  say "waiting for $CTR to report running"
+  while ! container_running "$CTR"; do
+    state=$(docker inspect -f '{{.State.Status}}' "$CTR" 2>/dev/null || true)
+    case "$state" in
+      exited|dead) fail_or_offer_recreate; exit 1 ;;
+    esac
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      print_main_failure "$CTR" "main container did not reach running within 120 s"
+      exit 1
+    fi
+    sleep 1
+  done
+  # Nginx can die just after docker reports running; prove it survives boot.
+  local settle=$(( SECONDS + 5 ))
+  while [ "$SECONDS" -lt "$settle" ]; do
+    container_running "$CTR" || { fail_or_offer_recreate; exit 1; }
+    sleep 1
+  done
+  say "waiting for the container's health endpoint"
+  deadline=$(( SECONDS + 120 ))
+  while ! docker exec "$CTR" curl --fail --silent --max-time 2 \
+        --output /dev/null http://127.0.0.1:8082/stub_status 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      print_main_failure "$CTR" "main container is up but its health endpoint does not answer after 120 s"
+      exit 1
+    fi
+    sleep 1
+  done
+}
+
+fail_or_offer_recreate() {
+  print_main_failure "$CTR"
+  stale_network_signature "$CTR" || return 0
+  report_stale_network "$CTR"
+  if [ -t 0 ]; then
+    local ans
+    read -r -p "[pdv] recreate the container now (volumes preserved)? [y/N] " ans
+    if [ "${ans,,}" = "y" ]; then
+      docker rm -f "$CTR" >/dev/null
+      say "removed $CTR — run again to compose it up on the live network"
+    fi
+  fi
+}
+
+# The window plan goes in as one detached script, like start-tmux.sh: the
+# session appears first, the setups run, the windows follow. Nothing about the
+# instance's clock depends on the caller staying attached.
+launch_windows() {
+  local remote=/tmp/pdv-start.sh
+  local script
+  script=$(mktemp "${TMPDIR:-/tmp}/pdv-start.XXXXXX")
+  render_start_script >"$script"
+  docker cp "$script" "$CTR:$remote" >/dev/null
+  rm -f "$script"
+  docker exec "$CTR" chmod +x "$remote"
+  docker exec "$CTR" chown penpot:users "$remote"
+  local -a env_args=(-e PENPOT_TMUX_ATTACH=false)
+  if $AGENTIC; then
+    env_args+=(-e "PENPOT_FLAGS=${PENPOT_FLAGS:-} enable-mcp" -e SERENA_ENABLED=true -e "SERENA_CONTEXT=$SERENA_CONTEXT")
+  fi
+  say "windows: $(render_plan | cut -f2 | uniq | tr '\n' ',' | sed 's/,$//')"
+  docker exec -d "${env_args[@]}" "$CTR" \
+    sudo -EH -u penpot PENPOT_PLUGIN_DEV="${PENPOT_PLUGIN_DEV:-}" "$remote"
+}
+
+wait_session() {
+  local deadline=$(( SECONDS + 120 ))
+  until has_session; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      warn "tmux session did not appear within 120 s — inspect the container log"
+      docker logs --tail 40 "$CTR" >&2 || true
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+tune_if_available() {
+  if [ -x "$ROOT/.devenv/devenv-tune" ]; then
+    "$ROOT/.devenv/devenv-tune" "$CTR" || warn "devenv-tune failed (non-fatal)"
+  else
+    vsay "no tune helper in $ROOT — skipping post-start hygiene"
+  fi
+}
+
+start_selected() {
+  local svc
+  for svc in ${SELECTED[@]+"${SELECTED[@]}"}; do start_service "$svc"; done
+}
+
+# The `-e KEY=VAL` flags reach the attach, as they do in manage.sh's
+# run-devenv --attach: they are forwarded to the interactive docker exec.
+attach_now() {
+  docker exec -ti ${extra_env[@]+"${extra_env[@]}"} \
+    "$CTR" sudo -EH -u penpot tmux attach -t "$SESSION"
+}
+
+finish_hints() {
+  local https mcp
+  https=$(( 3449 + WS_INDEX * 10000 ))
+  say "instance $WS ready"
+  sub "UI:      https://localhost:$https  (http://localhost:$(( https + 1 )))"
+  sub "attach:  pdv attach --ws $WS_INDEX"
+  sub "status:  pdv status --ws $WS_INDEX"
+  sub "watchers off/on: pdv stop --watchers --ws $WS_INDEX | pdv start --watchers --ws $WS_INDEX"
+}
+
+# ------------------------------------------------------------------ start
+cmd_start() {
+  take_service_flags "$@"
+  [ "${#REST[@]}" -eq 0 ] || svc_usage "start: unexpected argument '${REST[0]}'"
+  manage_load
+  load_selection
+  require_storybook_pairing
+  if ! container_running "$CTR"; then
+    die "start: $CTR is not running — bring it up with: pdv run --ws $WS_INDEX"
+  fi
+  has_session || die "start: $CTR has no tmux session '$SESSION' — bring it up with: pdv run --ws $WS_INDEX"
+  start_selected
+}
+
+# ------------------------------------------------------------------- stop
+cmd_stop() {
+  local selector=false all=false a
+  for a in "$@"; do
+    case "$a" in
+      --services|--services=*|--watchers) selector=true ;;
+      --all) all=true ;;
+    esac
+  done
+  if ! $selector; then
+    # No selector is the instance stop. --all and --ws are mutually exclusive
+    # in manage.sh, and silently dropping one of them would stop more than the
+    # caller asked for.
+    if $all && $WS_GIVEN; then
+      die "stop: --all and --ws are mutually exclusive (manage.sh refuses both too)"
+    fi
+    if $all; then
+      exec "$ROOT/manage.sh" stop-devenv --all
+    fi
+    exec "$ROOT/manage.sh" stop-devenv --ws "$WS_INDEX"
+  fi
+  take_service_flags "$@"
+  [ "${#REST[@]}" -eq 0 ] || svc_usage "stop: unexpected argument '${REST[0]}'"
+  manage_load
+  load_selection
+  if ! container_running "$CTR"; then
+    die "stop: $CTR is not running"
+  fi
+  local svc
+  for svc in ${SELECTED[@]+"${SELECTED[@]}"}; do stop_service "$svc"; done
+}
+
+# ---------------------------------------------------------------- status
+cmd_status() {
+  manage_load
+  if $WS_GIVEN; then
+    status_instance "$WS_INDEX"
+  else
+    local names name idx rc=0
+    names=$(docker ps -a --filter 'name=^penpot-devenv-ws[0-9]+-main$' --format '{{.Names}}' | sort || true)
+    if [ -z "$names" ]; then
+      say "no Penpot devenv containers on this daemon (rootless: $DOCKER_HOST)"
+      return 0
+    fi
+    for name in $names; do
+      idx="${name#penpot-devenv-ws}"; idx="${idx%-main}"
+      # One broken instance must not hide the ones after it; the exit status
+      # below still reports that something is wrong.
+      status_instance "$idx" || rc=1
+    done
+    return "${rc:-0}"
+  fi
+}
+
+status_instance() {
+  local idx="$1" name="penpot-devenv-ws$1-main" state running tree branch session windows broken="" reason=""
+  state=$(container_state "$name")
+  if [ -z "$state" ]; then
+    warn "$name: no such container"
+    return 1
+  fi
+  running=$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)
+  say "instance ws$idx  ($name)"
+  sub "state:   $state"
+  sub "ports:   $(published_ports "$name" | tr '\n' ' ')"
+  tree=$(mount_src "$name")
+  sub "tree:    ${tree:-<none>}"
+  if [ -n "$tree" ] && [ -d "$tree" ]; then
+    branch=$(git -C "$tree" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
+    sub "branch:  $branch"
+  fi
+  if [ "$running" != "true" ]; then
+    broken=true; reason="main container is not running"
+  else
+    session=$(docker exec "$name" sudo -EH -u penpot tmux has-session -t "$SESSION" 2>/dev/null && echo yes || echo no)
+    if [ "$session" = "yes" ]; then
+      windows=$(docker exec "$name" sudo -EH -u penpot tmux list-windows -t "$SESSION" \
+                  -F '#{window_index}:#{window_name}(#{window_panes})' 2>/dev/null | sort -n | tr '\n' ' ')
+      sub "windows: $windows"
+    else
+      broken=true; reason="main container is running but the tmux session '$SESSION' is gone"
+    fi
+    if ! docker exec "$name" curl --fail --silent --max-time 2 \
+         --output /dev/null http://127.0.0.1:8082/stub_status 2>/dev/null; then
+      broken=true
+      reason="${reason:-main container is running but its health endpoint does not answer}"
+    fi
+  fi
+  if [ "$broken" = "true" ]; then
+    print_main_failure "$name" "$reason"
+    if stale_network_signature "$name"; then report_stale_network_for "$idx"; fi
+    return 1
+  fi
+}
+
+report_stale_network_for() {
+  local idx="$1"
+  cat >&2 <<EOF
+[pdv] the stale-network signature is in this instance's log: nginx died on
+  [emerg] host not found in upstream "raw.githubusercontent.com"
+[pdv] escape hatch: pdv run --ws $idx --recreate   (removes the container, keeps every volume)
+EOF
+}
+
+# ------------------------------------------------------------- delegation
+cmd_overlay() {
+  local name="$1"; shift
+  manage_load
+  case "$name" in
+    acl)    local tree="$ROOT"; [ "$WS_INDEX" = 0 ] || tree="$PENPOT_WORKSPACES_DIR/$WS"
+            run_overlay devenv-acl "${REST[0]:-$tree}" ;;
+    tune)   run_overlay devenv-tune "$CTR" ;;
+    repl)   run_overlay start-repl.sh ${REST[@]+"${REST[@]}"} ;;
+    slim|fatten|jobs|report) run_overlay "devenv-$name" ${REST[@]+"${REST[@]}"} ;;
+    testjvm|eval)
+      if ! $WS_GIVEN; then
+        unset PENPOT_MAIN_CONTAINER_NAME
+        export DEVENV_CALLER_DIR="$CALLER_DIR"
+      fi
+      exec "$(overlay_script "devenv-$name")" ${REST[@]+"${REST[@]}"} ;;
+  esac
+}
+
+# ------------------------------------------------------------------- plan
+cmd_plan() {
+  take_service_flags "$@"
+  load_selection
+  require_storybook_pairing
+  render_plan
+}
+
+# ------------------------------------------------------------------- main
+main() {
+  local cmd="${1:-help}"
+  if [ "$#" -gt 0 ]; then shift; fi
+  # --repo names the checkout, so it has to be read before the tree is
+  # resolved. manage.sh has no such flag, so a fall-through never carries it.
+  local -a in=("$@") args=() original=()
+  local a j=0
+  while [ "$j" -lt "${#in[@]}" ]; do
+    a="${in[$j]}"
+    case "$a" in
+      --repo)   j=$(( j + 1 ))
+                [ "$j" -lt "${#in[@]}" ] || svc_usage "--repo needs a path"
+                PDV_REPO="${in[$j]}" ;;
+      --repo=*) PDV_REPO="${a#--repo=}" ;;
+      *)        args+=("$a") ;;
+    esac
+    j=$(( j + 1 ))
+  done
+  original=("$cmd" ${args[@]+"${args[@]}"})
+
+  resolve_root
+  # manage.sh resolves defaults.env and the compose files against the cwd, and
+  # ws0 binds the directory it runs from. One checkout, one cwd.
+  cd "$ROOT"
+  parse_instance ${args[@]+"${args[@]}"}
+
+  case "$cmd" in
+    help|-h|--help) usage ;;
+    run)            cmd_run ${REST[@]+"${REST[@]}"} ;;
+    start)          cmd_start ${REST[@]+"${REST[@]}"} ;;
+    stop)           cmd_stop ${REST[@]+"${REST[@]}"} ;;
+    attach)         manage_load; exec "$ROOT/manage.sh" attach-devenv --ws "$WS_INDEX" ;;
+    logs)           manage_load; exec "$ROOT/manage.sh" log-devenv --ws "$WS_INDEX" ;;
+    status)         cmd_status ${REST[@]+"${REST[@]}"} ;;
+    plan)           cmd_plan ${REST[@]+"${REST[@]}"} ;;
+    acl|tune|slim|just-backend|fatten|jobs|report|repl|testjvm|eval)
+                    if [ "$cmd" = "just-backend" ]; then cmd=slim; fi
+                    cmd_overlay "$cmd" ${REST[@]+"${REST[@]}"} ;;
+    *)              manage_load; exec "$ROOT/manage.sh" ${original[@]+"${original[@]}"} ;;
+  esac
+}
+
+main "$@"
