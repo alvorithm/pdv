@@ -97,7 +97,7 @@ pdv logs                        # follow the container log
 
 ```sh
 pdv acl                         # grant the container user write access to the tree
-pdv tune                        # post-start fixes and the image currency check, safe to rerun
+pdv tune                        # post-start fixes (config.js, clojure-lsp, skills link, cargo home) and the image check
 ```
 
 ## Troubleshooting

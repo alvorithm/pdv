@@ -12,8 +12,9 @@
 # because it grants the ACL a rootless daemon needs, which upstream does not.
 # With --fast, also prove the
 # adoption rules that only a running instance can show: --recreate keeps the
-# volumes, the heap cap reaches the JVMs, and status reports a stopped
-# instance without attaching.
+# volumes, the tune repairs config.js, clojure-lsp and the skills link, the
+# heap cap reaches the JVMs, and status reports a stopped instance without
+# attaching.
 #
 # Rootful docker is a separate daemon: --rootful runs the live matrix against
 # /var/run/docker.sock. The chosen workspaces must be stopped on the rootless
@@ -50,7 +51,7 @@ while [ "$#" -gt 0 ]; do
     --rootful)  ROOTFUL=true ;;
     --socket)   SOCKET="$2"; shift ;;
     --timeout)  TIMEOUT="$2"; shift ;;
-    -h|--help)  sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,27p' "$0"; exit 0 ;;
     *) echo "parity: unknown argument '$1'" >&2; exit 2 ;;
   esac
   shift
@@ -399,6 +400,44 @@ check_cap_live() {
   fi
 }
 
+# The tune's repairs: a deleted config.js comes back from the snapshot, the
+# clojure-lsp setting is in the container home, and the skills link exists.
+check_tune_live() {
+  local n="$1" ctr cfg tree before after out
+  ctr=$(CTR_FOR "$n")
+  cfg=/home/penpot/penpot/frontend/resources/public/js/config.js
+  dk exec "$ctr" true >/dev/null 2>&1 || { skip "ws$n: the tune checks need a running instance"; return 0; }
+  before=$(dk exec "$ctr" cat "$cfg" 2>/dev/null || true)
+  if [ -n "$before" ]; then
+    dk exec "$ctr" sudo -EH -u penpot rm -f "$cfg"
+  fi
+  out=$( ( cd "$ROOT" && "$PDV" tune --ws "$n" ) 2>&1 ) || { bad "ws$n: pdv tune exited non-zero"; printf '%s\n' "$out" | sed 's/^/     /'; return 1; }
+  if [ -z "$before" ]; then
+    skip "ws$n: no config.js in the tree, so its restore is unproven here (use --agentic)"
+  else
+    after=$(dk exec "$ctr" cat "$cfg" 2>/dev/null || true)
+    if [ "$after" = "$before" ]; then
+      ok "ws$n: tune restores a deleted config.js from the instance's snapshot"
+    else
+      bad "ws$n: config.js was not restored as it was (after: '${after:-<missing>}')"
+    fi
+  fi
+  if dk exec "$ctr" sudo -EH -u penpot cat /home/penpot/.config/clojure-lsp/config.edn 2>/dev/null \
+       | grep -Eq ':clojure-lsp/unused-public-var[[:space:]]*\{[[:space:]]*:level[[:space:]]*:off'; then
+    ok "ws$n: the container home turns clojure-lsp's unused-public-var off"
+  else
+    bad "ws$n: the container home's clojure-lsp config does not turn unused-public-var off"
+  fi
+  tree=$(dk inspect -f '{{range .Mounts}}{{if eq .Destination "/home/penpot/penpot"}}{{.Source}}{{end}}{{end}}' "$ctr")
+  if [ ! -d "$tree/.agents/skills" ]; then
+    skip "ws$n: the tree has no .agents/skills, so the skills link is unproven here"
+  elif [ -d "$tree/.claude/skills" ]; then
+    ok "ws$n: .claude/skills resolves to a directory in the bound tree"
+  else
+    bad "ws$n: .claude/skills is missing or dangling in $tree"
+  fi
+}
+
 check_status_broken() {
   local n="$1" ctr out rc
   ctr=$(CTR_FOR "$n")
@@ -426,6 +465,7 @@ else
     check_live_ws "$n"
     if $FAST; then
       check_recreate "$n"
+      check_tune_live "$n"
       check_cap_live "$n"
       check_status_broken "$n"
     else

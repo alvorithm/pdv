@@ -1,0 +1,8 @@
+{;; The sv/defmethod hook declares a gensym'd var per RPC handler, and only
+ ;; runtime dispatch through sv/scan-ns resolves it, so clojure-lsp's own
+ ;; unused-public-var pass flags every handler for having no static user.
+ ;; No clj-kondo setting reaches that linter (it runs inside clojure-lsp),
+ ;; so it goes off at the server. pdv tune installs this file into the
+ ;; container home at ~/.config/clojure-lsp/config.edn when none exists;
+ ;; Serena runs the same binary and reads the same file.
+ :linters {:clojure-lsp/unused-public-var {:level :off}}}

@@ -74,8 +74,10 @@ Policy flags
 Instance hygiene
   acl [tree]   grant the container user write access to the bound tree
                (rootless Docker); run does this before every start.
-  tune         post-start fixes and the image currency check, safe to
-               rerun; run does this after every start.
+  tune         post-start fixes, safe to rerun; run does this after every
+               start: config.js snapshot and repair, clojure-lsp setting,
+               .claude/skills link, tmux mouse (opt-in), /opt/cargo owner,
+               image currency check.
 
 Anything else is manage.sh verbatim: pdv <command> [args…] runs
 <checkout>/manage.sh <command> [args…].
@@ -85,6 +87,8 @@ Environment
   PENPOT_REPO, PDV_REPO   checkout to act on, lower precedence than --repo
   DEVENV_JAVA_OPTS        heap cap, same as --java-opts
   DEVENV_VERBOSE=0        terse output (actions and warnings only)
+  PDV_PENPOT_FLAGS        flags for a generated config.js (default enable-mcp)
+  PDV_TMUX_MOUSE=1        tune turns the tmux mouse on
 
 Debug
   plan [same service flags]   print the window plan, one
@@ -168,21 +172,22 @@ cmd_run() {
     die "run: --sync is not allowed on ws0 (the live checkout is the source)"
   fi
 
-  # The same pre-flight manage.sh makes: without config.js the frontend never
-  # enables MCP, so an agentic instance would look up but behave inert.
-  if $AGENTIC; then
-    local cfg="frontend/resources/public/js/config.js"
-    if [ ! -f "$ROOT/$cfg" ]; then
-      cat >&2 <<EOF
-[pdv] $cfg is missing in $ROOT.
-Create it before running with --agentic. The file is gitignored, read directly
-from the checkout on ws0 and copied into a wsN workspace on its first sync.
-Without it the frontend never sets enable-mcp and an agent cannot drive Penpot.
-Minimal content:
-  var penpotFlags = "enable-mcp";
-EOF
-      exit 1
+  # Without config.js the frontend never enables MCP, so an agentic instance
+  # would look up but behave inert. manage.sh refuses to start; pdv restores
+  # the file instead: from ws0's own snapshot when the container still exists
+  # (docker cp reads a stopped container), else generated from
+  # PDV_PENPOT_FLAGS. The file is gitignored, read from the checkout on ws0,
+  # and copied into a wsN workspace on its first sync.
+  if $AGENTIC && [ ! -f "$ROOT/$CONFIG_JS" ]; then
+    mkdir -p "$(dirname "$ROOT/$CONFIG_JS")"
+    if [ "$WS" = "ws0" ] && container_exists "$CTR" \
+       && docker cp "$CTR:$CTR_STATE/config.js" "$ROOT/$CONFIG_JS" >/dev/null 2>&1; then
+      say "pre-flight: restored $CONFIG_JS from the ws0 instance's snapshot"
+    else
+      config_js_content >"$ROOT/$CONFIG_JS"
+      say "pre-flight: wrote $CONFIG_JS with flags '${PDV_PENPOT_FLAGS:-enable-mcp}'"
     fi
+    why "the file is gitignored and a frontend build deletes it, and without it the frontend never enables MCP"
   fi
 
   [ -n "$git_name" ]  || git_name=$(git config user.name 2>/dev/null || true)

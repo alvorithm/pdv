@@ -322,7 +322,116 @@ grant_acl() {
 # ----------------------------------------------------------------- the tune
 # Idempotent post-start fixes for a running instance. Each step either checks
 # or applies a fix that never changes what is running.
+
+# The instance's own state directory, inside its home volume: it survives a
+# container recreate and belongs to that one instance.
+CTR_STATE="/home/penpot/.local/state/pdv"
+CONFIG_JS="frontend/resources/public/js/config.js"
+
+# The flags a generated config.js carries.
+config_js_content() {
+  printf 'var penpotFlags = "%s";\n' "${PDV_PENPOT_FLAGS:-enable-mcp}"
+}
+
+# config.js is gitignored and lives under resources/public, which a frontend
+# build deletes whole, and the agentic frontend needs it to enable MCP. While
+# the file exists, the tune keeps a snapshot of it in the instance's home; once
+# a build has deleted it (or it is a symlink, which the container cannot
+# follow out of the bind mount), the tune restores the snapshot. Without a
+# snapshot it generates the file from PDV_PENPOT_FLAGS, but only for an
+# agentic instance or when that variable is set.
+tune_config_js() {
+  local cfg="$DEST/$CONFIG_JS" snap="$CTR_STATE/config.js" state agentic=$AGENTIC
+  state=$(docker exec "$CTR" sh -c '
+    if [ -L "$1" ]; then echo link
+    elif [ -f "$1" ]; then echo file
+    elif [ -f "$2" ]; then echo restorable
+    else echo missing; fi' _ "$cfg" "$snap" 2>/dev/null || true)
+  case "$state" in
+    file)
+      docker exec "$CTR" sudo -EH -u penpot sh -c \
+        'mkdir -p "$(dirname "$2")" && { cmp -s "$1" "$2" || cp "$1" "$2"; }' _ "$cfg" "$snap" \
+        && vsay "tune: config.js present, snapshot kept in the instance home" \
+        || warn "tune: could not snapshot config.js; a build that deletes it will not be repaired"
+      return 0 ;;
+    restorable)
+      say "tune: config.js is missing, restoring the instance's snapshot"
+      why "a frontend build deletes resources/public whole, and config.js is gitignored, so nothing else brings it back"
+      docker exec "$CTR" sudo -EH -u penpot sh -c \
+        'mkdir -p "$(dirname "$1")" && rm -f "$1" && cp "$2" "$1"' _ "$cfg" "$snap" \
+        || warn "tune: could not restore config.js from $snap"
+      return 0 ;;
+  esac
+  # link, or missing with no snapshot.
+  if ! $agentic && tmx list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx mcp; then
+    agentic=true
+  fi
+  if ! $agentic && [ -z "${PDV_PENPOT_FLAGS:-}" ]; then
+    vsay "tune: no config.js and nothing asks for one (not agentic, PDV_PENPOT_FLAGS unset)"
+    return 0
+  fi
+  say "tune: writing config.js with flags '${PDV_PENPOT_FLAGS:-enable-mcp}'"
+  why "the agentic frontend enables MCP only through config.js, and a symlink into a directory outside the bind mount dangles inside the container"
+  config_js_content | docker exec -i "$CTR" sudo -EH -u penpot sh -c \
+    'mkdir -p "$(dirname "$1")" && rm -f "$1" && cat > "$1"' _ "$cfg" \
+    || warn "tune: could not write config.js; the frontend will not enable MCP"
+}
+
+# clojure-lsp flags every RPC handler as an unused public var: the
+# sv/defmethod hook declares a var per handler that only runtime dispatch
+# resolves, and no clj-kondo setting reaches that linter. The setting goes in
+# the container home, which clojure-lsp and Serena both read. A config the
+# user wrote there is left alone.
+tune_clojure_lsp() {
+  local dst="/home/penpot/.config/clojure-lsp/config.edn" src="$PDV_SELF/share/clojure-lsp-config.edn" cur
+  cur=$(docker exec "$CTR" sudo -EH -u penpot cat "$dst" 2>/dev/null || true)
+  if [ -z "$cur" ]; then
+    say "tune: writing $dst (unused-public-var off)"
+    why "clojure-lsp flags every sv/defmethod handler as unused, because only runtime dispatch resolves the var the hook declares"
+    docker exec -i "$CTR" sudo -EH -u penpot sh -c 'mkdir -p "$(dirname "$1")" && cat > "$1"' _ "$dst" <"$src" \
+      || warn "tune: could not write $dst"
+  elif grep -Eq ':clojure-lsp/unused-public-var[[:space:]]*\{[[:space:]]*:level[[:space:]]*:off' <<<"$cur"; then
+    vsay "tune: $dst already turns unused-public-var off"
+  else
+    warn "tune: $dst is your own and keeps unused-public-var on; add the linter setting from $src to silence the RPC handlers"
+  fi
+}
+
+# Claude Code reads skills only from .claude/skills, the repository keeps them
+# in .agents/skills, and /.claude is gitignored. manage.sh seeds the link in
+# wsN copies only, so ws0 and worktrees get it here. An existing path is never
+# replaced.
+tune_skills_link() {
+  local tree link
+  tree=$(mount_src "$CTR")
+  [ -n "$tree" ] || return 0
+  link="$tree/.claude/skills"
+  if [ -e "$link" ] || [ -L "$link" ]; then
+    vsay "tune: $link exists, nothing to do"
+  elif [ ! -d "$tree/.agents/skills" ]; then
+    vsay "tune: no .agents/skills in $tree, no skills link to make"
+  else
+    say "tune: linking .claude/skills -> ../.agents/skills in $tree"
+    why "Claude Code reads skills only from .claude/skills, and the repository keeps them in .agents/skills"
+    { mkdir -p "$tree/.claude" && ln -s ../.agents/skills "$link"; } || warn "tune: could not create $link"
+  fi
+}
+
+# The image ships tmux.conf with mouse off and re-copies it on every start, so
+# a setting made inside the container does not last. Opt-in, because it is a
+# preference.
+tune_tmux_mouse() {
+  [ "${PDV_TMUX_MOUSE:-0}" = 1 ] || return 0
+  say "tune: tmux mouse on (PDV_TMUX_MOUSE=1)"
+  tmx set -g mouse on >/dev/null || warn "tune: could not turn the tmux mouse on (no session yet?)"
+}
+
 tune_instance() {
+  tune_config_js
+  tune_clojure_lsp
+  tune_skills_link
+  tune_tmux_mouse
+
   # The image vendors CARGO_HOME=/opt/cargo owned by root. Reads work, but a
   # Cargo.lock that needs a crate missing from the vendored set makes the
   # render-wasm build fail with 'Permission denied' on registry/cache. The
