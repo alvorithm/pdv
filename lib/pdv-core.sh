@@ -357,8 +357,7 @@ tune_config_js() {
     restorable)
       say "tune: config.js is missing, restoring the instance's snapshot"
       why "a frontend build deletes resources/public whole, and config.js is gitignored, so nothing else brings it back"
-      docker exec "$CTR" sudo -EH -u penpot sh -c \
-        'mkdir -p "$(dirname "$1")" && rm -f "$1" && cp "$2" "$1"' _ "$cfg" "$snap" \
+      docker exec "$CTR" cat "$snap" | ctr_write_file "$cfg" \
         || warn "tune: could not restore config.js from $snap"
       return 0 ;;
   esac
@@ -372,9 +371,21 @@ tune_config_js() {
   fi
   say "tune: writing config.js with flags '${PDV_PENPOT_FLAGS:-enable-mcp}'"
   why "the agentic frontend enables MCP only through config.js, and a symlink into a directory outside the bind mount dangles inside the container"
-  config_js_content | docker exec -i "$CTR" sudo -EH -u penpot sh -c \
-    'mkdir -p "$(dirname "$1")" && rm -f "$1" && cat > "$1"' _ "$cfg" \
+  config_js_content | ctr_write_file "$cfg" \
     || warn "tune: could not write config.js; the frontend will not enable MCP"
+}
+
+# Write stdin to a path inside the container, replacing whatever is there. As
+# the container user first; a directory the host user made can carry an ACL
+# mask of r-x, so the fallback writes as root and hands the file to the
+# directory's owner.
+ctr_write_file() {
+  local content
+  content=$(cat)
+  printf '%s\n' "$content" | docker exec -i "$CTR" sudo -EH -u penpot sh -c \
+    'mkdir -p "$(dirname "$1")" && rm -f "$1" && cat > "$1"' _ "$1" 2>/dev/null && return 0
+  printf '%s\n' "$content" | docker exec -i "$CTR" sh -c \
+    'd=$(dirname "$1"); mkdir -p "$d" && rm -f "$1" && cat > "$1" && chown --reference="$d" "$1"' _ "$1"
 }
 
 # clojure-lsp flags every RPC handler as an unused public var: the

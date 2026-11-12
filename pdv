@@ -174,20 +174,30 @@ cmd_run() {
 
   # Without config.js the frontend never enables MCP, so an agentic instance
   # would look up but behave inert. manage.sh refuses to start; pdv restores
-  # the file instead: from ws0's own snapshot when the container still exists
-  # (docker cp reads a stopped container), else generated from
-  # PDV_PENPOT_FLAGS. The file is gitignored, read from the checkout on ws0,
-  # and copied into a wsN workspace on its first sync.
-  if $AGENTIC && [ ! -f "$ROOT/$CONFIG_JS" ]; then
-    mkdir -p "$(dirname "$ROOT/$CONFIG_JS")"
-    if [ "$WS" = "ws0" ] && container_exists "$CTR" \
-       && docker cp "$CTR:$CTR_STATE/config.js" "$ROOT/$CONFIG_JS" >/dev/null 2>&1; then
-      say "pre-flight: restored $CONFIG_JS from the ws0 instance's snapshot"
-    else
-      config_js_content >"$ROOT/$CONFIG_JS"
-      say "pre-flight: wrote $CONFIG_JS with flags '${PDV_PENPOT_FLAGS:-enable-mcp}'"
+  # the file instead, in the tree the instance binds: the instance's own
+  # snapshot when its container still exists (docker cp reads a stopped
+  # container), else generated from PDV_PENPOT_FLAGS. A wsN slot that does
+  # not exist yet gets the file through ws0's checkout, which its first sync
+  # copies from.
+  if $AGENTIC; then
+    local cfg_tree="$ROOT" cfg_path
+    if [ "$WS" != "ws0" ] && [ -d "$PENPOT_WORKSPACES_DIR/$WS" ]; then
+      cfg_tree=$(readlink -f "$PENPOT_WORKSPACES_DIR/$WS")
     fi
-    why "the file is gitignored and a frontend build deletes it, and without it the frontend never enables MCP"
+    cfg_path="$cfg_tree/$CONFIG_JS"
+    if [ ! -f "$cfg_path" ]; then
+      mkdir -p "$(dirname "$cfg_path")"
+      if [ "$cfg_tree" != "$ROOT" ] || [ "$WS" = "ws0" ]; then
+        container_exists "$CTR" && docker cp "$CTR:$CTR_STATE/config.js" "$cfg_path" >/dev/null 2>&1 || true
+      fi
+      if [ -f "$cfg_path" ]; then
+        say "pre-flight: restored $cfg_path from the $WS instance's snapshot"
+      else
+        config_js_content >"$cfg_path"
+        say "pre-flight: wrote $cfg_path with flags '${PDV_PENPOT_FLAGS:-enable-mcp}'"
+      fi
+      why "the file is gitignored and a frontend build deletes it, and without it the frontend never enables MCP"
+    fi
   fi
 
   [ -n "$git_name" ]  || git_name=$(git config user.name 2>/dev/null || true)

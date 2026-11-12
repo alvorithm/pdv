@@ -409,7 +409,12 @@ check_tune_live() {
   dk exec "$ctr" true >/dev/null 2>&1 || { skip "ws$n: the tune checks need a running instance"; return 0; }
   before=$(dk exec "$ctr" cat "$cfg" 2>/dev/null || true)
   if [ -n "$before" ]; then
-    dk exec "$ctr" sudo -EH -u penpot rm -f "$cfg"
+    # As root: a host-made public/js can mask the container user's write bit.
+    dk exec "$ctr" rm -f "$cfg"
+    if dk exec "$ctr" test -e "$cfg"; then
+      bad "ws$n: config.js survived its deletion, so the restore cannot be proven"
+      return 1
+    fi
   fi
   out=$( ( cd "$ROOT" && "$PDV" tune --ws "$n" ) 2>&1 ) || { bad "ws$n: pdv tune exited non-zero"; printf '%s\n' "$out" | sed 's/^/     /'; return 1; }
   if [ -z "$before" ]; then
