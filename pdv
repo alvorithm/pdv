@@ -207,17 +207,17 @@ EOF
 
   if [ "$WS" != "ws0" ]; then ws_briefing; fi
 
+  devenv_gpu=$gpu
+  if $gpu; then check-devenv-gpu-support || exit 1; fi
+
+  say "pull: devenv image"
+  pull-devenv-if-not-exists
   say "pre-start: acl"
   why "rootless Docker: the container user cannot write a tree the host user owns until it is granted an ACL"
   local tree="$ROOT"
   [ "$WS_INDEX" = 0 ] || tree="$PENPOT_WORKSPACES_DIR/$WS"
   grant_acl "$tree" || warn "acl failed (non-fatal); watch tabs fail with EACCES if the container user cannot write $tree"
 
-  devenv_gpu=$gpu
-  if $gpu; then check-devenv-gpu-support || exit 1; fi
-
-  say "pull: devenv image"
-  pull-devenv-if-not-exists
   say "network + shared infra"
   ensure-devenv-network
   ensure-infra-up
