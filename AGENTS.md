@@ -13,11 +13,7 @@ pdv is the Penpot development-environment manager: it owns the instance bring-up
 
 ## The contract
 
-- A behaviour change lands with the parity harness covering it. `test/parity.sh` runs offline by default, and `--live --fast` adds the comparison against `./manage.sh run-devenv` on a running instance.
-- pdv never restates the compose environment that `manage.sh` computes. The fall-through is the drift guard.
-- pdv depends only on the checkout's `manage.sh`, the files tracked in the Penpot repository, and the devenv image. It calls no untracked helper from the checkout, so it runs on a stock clone.
-- The README and the manual carry the user-facing surface. A flag that changes behaviour changes them in the same commit.
-- bash 4 or newer on the host, and every script passes `bash -n`.
+[CONTRIBUTING.md](CONTRIBUTING.md) carries the checks every change passes and the upstream plan for every workaround. A new workaround adds its section there in the same commit.
 
 ## Commits
 

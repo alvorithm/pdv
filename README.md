@@ -113,7 +113,7 @@ pdv tune                        # post-start fixes (config.js, clojure-lsp, skil
 
 ## The manual and the harness carry the detail
 
-`pdv help` lists the commands and flags it owns. [The manual](docs/manual-pdv.md) explains the service model, the heap channel, the cache policy, the recreate path, the hygiene verbs, and the parity harness.
+`pdv help` lists the commands and flags it owns. [The manual](docs/manual-pdv.md) explains the service model, the heap channel, the cache policy, the recreate path, the hygiene verbs, and the parity harness. Much of what pdv does works around gaps in Penpot's devenv: [CONTRIBUTING.md](CONTRIBUTING.md) lists each workaround with the change that would move it into Penpot, and the checks a contribution passes.
 
 The parity harness checks the contract in two modes. The offline mode reads the window plan, the service rules, the cache policy, and the heap cap out of the checkout and compares them with pdv's. The live mode brings the same workspace up with `pdv run` and with `./manage.sh run-devenv`, compares the two instances, and tears both down.
 
