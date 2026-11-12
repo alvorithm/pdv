@@ -104,4 +104,3 @@ In Penpot: the image's `tmux.conf` ends with `source-file -q ~/.tmux.conf.local`
 ## The implementation language is open
 
 pdv is written in bash, and the next step is a port to a language with real argument parsing and data structures. Babashka is the current candidate: the devenv image already ships it, and Penpot already runs Babashka scripts. Python is the alternative, because practically every Linux host has it and `manage.sh` already requires it on the host to build the MCP client configuration. A port can move one command at a time and call the remaining bash until none is left. The parity harness judges either port by the same checks.
-
