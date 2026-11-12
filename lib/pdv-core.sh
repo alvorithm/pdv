@@ -99,7 +99,6 @@ parse_instance() {
 # dynamic-scope options like devenv_gpu reach instance-compose.
 manage_load() {
   [ -z "${PDV_MANAGE_LOADED:-}" ] || return 0
-  export PENPOT_WORKSPACES_DIR="${PENPOT_WORKSPACES_DIR:-$(workspaces_dir)}"
   # manage.sh appends safe.directory to the global git config on every run;
   # hand it a snapshot so pdv does not grow that file.
   if [ -z "${GIT_CONFIG_GLOBAL:-}" ] || [ ! -f "$GIT_CONFIG_GLOBAL" ]; then
@@ -120,16 +119,6 @@ manage_load() {
   set -- ${saved[@]+"${saved[@]}"}
   command -v instance-compose >/dev/null || die "could not load manage.sh functions from $ROOT"
   PDV_MANAGE_LOADED=1
-}
-
-# Where the wsN slots live: manage.sh's own default, with the overlay
-# dispatcher's XDG fallback for a checkout whose manage.sh predates it.
-workspaces_dir() {
-  if [ -d "$HOME/.penpot/penpot_workspaces" ]; then
-    printf '%s' "$HOME/.penpot/penpot_workspaces"
-  else
-    printf '%s' "${XDG_DATA_HOME:-$HOME/.local/share}/penpot-devenv/workspaces"
-  fi
 }
 
 # ---------------------------------------------------------------- containers
@@ -210,8 +199,8 @@ has_session() {
 # A pane is "busy" iff its first process was exec-replaced by another program,
 # or is still a shell but has children. tmux's pane_current_command cannot tell
 # them apart: watch scripts are bash wrappers, so the group leader is named
-# bash and a live watcher would read as an idle shell. devenv-slim, devenv-fatten
-# and pdv share this definition, so a pane one calls stopped is stopped for all.
+# bash and a live watcher would read as an idle shell. Every verb that stops
+# or starts a window uses this definition.
 pane_busy() {
   docker exec "$CTR" bash -c '
     comm=$(ps -o comm= -p "$1" 2>/dev/null)
@@ -242,28 +231,131 @@ ws_briefing() {
     why "symlink to $(readlink -f "$dir") — run binds that tree, so commits land in the worktree you meant"
   elif [ -d "$dir" ]; then
     why "a real directory, so it is an rsync clone on branch $WS/<branch>, not your worktree"
-    imp "to bind a worktree instead: pdv stop --ws $WS_INDEX; rm -rf '$dir'; ln -s ~/Worktrees/<repo>-<branch> '$dir'; then run again"
+    imp "to bind a worktree instead: pdv stop --ws $WS_INDEX; rm -rf '$dir'; ln -s <worktree> '$dir'; then run again"
   else
     say "workspace $WS does not exist yet"
-    imp "bind a worktree before the first run: ln -s ~/Worktrees/<repo>-<branch> '$dir'"
+    imp "bind a worktree before the first run: ln -s <worktree> '$dir'"
   fi
   say "agent MCP for $WS: PENPOT_MCP_PORT=$(( 4401 + WS_INDEX * 10000 )) SERENA_MCP_PORT=$(( 14181 + WS_INDEX * 10000 ))"
-  why ".mcp.json reads those two variables and falls back to ws0's ports, so a session started without them talks to ws0 whatever worktree it sits in"
+  why "a coding agent reaches this instance's MCP servers when started with './manage.sh start-coding-agent <client> --ws $WS_INDEX', which wires those ports"
 }
 
-# ------------------------------------------------------------ overlay scripts
-# The capability helpers a checkout installs beside manage.sh, reached through
-# the tree. A checkout without them reports the missing verb instead of
-# guessing.
-overlay_script() {
-  local name="$1"
-  [ -x "$ROOT/.devenv/$name" ] || die "$ROOT carries no $name helper, so the '$name' capability is not installed"
-  printf '%s' "$ROOT/.devenv/$name"
+# ------------------------------------------------------------------ the acl
+# Rootless Docker maps the image's `penpot` user to a subuid, which falls into
+# `other` on a tree the host user owns, so every `pnpm install` in the watch
+# panes fails with EACCES and nothing is built. A worktree does not inherit
+# the main checkout's ACL, so each tree is granted once, before the container
+# starts: the watchers begin their installs within seconds of it.
+#
+# The container uid is measured (a one-shot container creates a file, the host
+# stats it) rather than computed from /etc/subuid. The grant, on every entry
+# the host user owns:
+#   user:<cuid>:rwX           the container user reads and writes
+#   default:user:<cuid>:rwx   and so does everything created later
+#   default:user:<me>:rwx     the host user keeps write access to what the
+#                             container creates: a directory with a default
+#                             ACL ignores the umask, and the inherited
+#                             default:other::r-x would lock the host user out
+# Symlinks are never followed. Entries the container already owns are skipped:
+# only their owner may change their ACL, and the container can write them.
+#
+# A missing tree is a wsN slot that manage.sh is about to fill with a copy.
+# Nothing is granted then: rsync -a and install -D set the ACL mask from their
+# own modes, so a default ACL on the parent would be masked to r-x where the
+# watcher writes its build. `pdv acl --ws N` grants the copy once it exists.
+grant_acl() {
+  local tree="$1" img="$DEVENV_IMGNAME:$DEVENV_TAG" probe cuid me acl
+  if [ ! -d "$tree" ]; then
+    vsay "acl: skipped, $tree does not exist yet"
+    imp "symlink a worktree into the slot before the first run, and the grant applies to that worktree; a copy made by manage.sh is granted by 'pdv acl --ws $WS_INDEX' once it exists"
+    return 0
+  fi
+  tree=$(readlink -f "$tree")
+  if ! docker image inspect "$img" >/dev/null 2>&1; then
+    vsay "acl: skipped, image $img is not present yet, so the container uid cannot be measured"
+    imp "run pulls it; run 'pdv acl' afterwards if the watch panes fail with EACCES"
+    return 0
+  fi
+
+  # The probe directory must be writable by a uid the host user cannot name
+  # yet, hence 777; it lives for the duration of one docker run.
+  probe=$(mktemp -d)
+  chmod 777 "$probe"
+  if ! docker run --rm --network none --user penpot --entrypoint touch \
+         -v "$probe:/probe" "$img" /probe/uid >/dev/null; then
+    rm -rf "$probe"
+    warn "acl: the probe container could not run, so the container uid is unknown"
+    return 1
+  fi
+  cuid=$(stat -c %u "$probe/uid")
+  rm -rf "$probe"
+  me=$(id -u)
+
+  if [ "$cuid" = "$me" ]; then
+    vsay "acl: nothing to grant, the container user penpot is host uid $me, the owner of $tree"
+    why "Docker maps uids one to one here (rootful, no user-namespace remap), so ownership already gives write access"
+    return 0
+  fi
+
+  command -v setfacl >/dev/null || { warn "acl: setfacl is missing (install the acl package); the container user (host uid $cuid) cannot write $tree"; return 1; }
+  acl=$(getfacl -cpn "$tree" 2>/dev/null || true)
+  if grep -q "^user:$cuid:rwx" <<<"$acl" && grep -q "^default:user:$cuid:rwx" <<<"$acl"; then
+    vsay "acl: already granted, $tree carries user:$cuid:rwx and its default (container user penpot = host uid $cuid)"
+    return 0
+  fi
+
+  say "acl: granting host uid $cuid (container user penpot) write access to $tree"
+  find "$tree" -user "$me" ! -type l -exec setfacl -m "u:$cuid:rwX" {} +
+  find "$tree" -user "$me" -type d -exec setfacl -m "d:u:$cuid:rwx,d:u:$me:rwx" {} +
+
+  if docker run --rm --network none --user penpot --entrypoint sh \
+       -v "$tree:/w" "$img" -c \
+       'd=/w/frontend; [ -d "$d" ] || d=/w; touch "$d/.pdv-acl-probe" && rm "$d/.pdv-acl-probe"'; then
+    say "acl: verified, penpot creates and removes a file in the tree from inside a container"
+  else
+    warn "acl: penpot still cannot write $tree after the grant; inspect with getfacl -n $tree"
+    return 1
+  fi
+  imp "an instance already running on this tree started its panes before the grant: restart the failed panes (pdv start --watchers), never the container"
 }
 
-run_overlay() {
-  local name="$1"; shift
-  local script
-  script=$(overlay_script "$name")
-  PENPOT_MAIN_CONTAINER_NAME="$CTR" exec "$script" "$@"
+# ----------------------------------------------------------------- the tune
+# Idempotent post-start fixes for a running instance. Each step either checks
+# or applies a fix that never changes what is running.
+tune_instance() {
+  # The image vendors CARGO_HOME=/opt/cargo owned by root. Reads work, but a
+  # Cargo.lock that needs a crate missing from the vendored set makes the
+  # render-wasm build fail with 'Permission denied' on registry/cache. The
+  # container's filesystem resets on recreate, so the fix is reapplied here.
+  local owner
+  owner=$(docker exec "$CTR" stat -c %U /opt/cargo 2>/dev/null || true)
+  if [ "$owner" = "root" ]; then
+    say "tune: chown -R penpot:users /opt/cargo (in the container)"
+    why "the image's CARGO_HOME is root-owned, so render-wasm builds fail when they must fetch a crate the vendored set lacks"
+    docker exec "$CTR" chown -R penpot:users /opt/cargo || warn "tune: chown of /opt/cargo failed; render-wasm builds fail on crates the vendored set lacks"
+  elif [ -n "$owner" ]; then
+    vsay "tune: /opt/cargo is owned by $owner, nothing to do"
+  fi
+
+  # The image pins the toolchain (Node, JDK, Rust, emscripten) and the code
+  # comes from the bind mount, so a stale image shows up as toolchain errors
+  # once the checkout expects a newer one. Advisory only.
+  local img="$DEVENV_IMGNAME:$DEVENV_TAG" running_img local_id local_digest remote_digest
+  local adopt="pdv pull-devenv && pdv stop --ws $WS_INDEX && pdv run --ws $WS_INDEX"
+  running_img=$(docker inspect -f '{{.Image}}' "$CTR" 2>/dev/null || true)
+  local_id=$(docker image inspect -f '{{.Id}}' "$img" 2>/dev/null || true)
+  if [ -n "$local_id" ] && [ -n "$running_img" ] && [ "$running_img" != "$local_id" ]; then
+    warn "tune: $CTR runs an older $img than the one pulled locally; recreate it with: pdv run --ws $WS_INDEX --recreate"
+  fi
+  local_digest=$(docker image inspect -f '{{join .RepoDigests "\n"}}' "$img" 2>/dev/null | sed -n 's/^.*@//p' | head -1)
+  remote_digest=$(docker buildx imagetools inspect "$img" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
+  if [ -z "$local_digest" ] || [ -z "$remote_digest" ]; then
+    vsay "tune: image currency check skipped (registry unreachable, docker buildx missing, or a locally built image)"
+  elif [ "$local_digest" = "$remote_digest" ]; then
+    vsay "tune: $img is current (${local_digest:0:19})"
+  else
+    warn "tune: a newer $img is available upstream"
+    imp "a mismatch shows as pnpm engine errors, UnsupportedClassVersionError in the backend, or render-wasm build failures"
+    imp "adopting it removes the container and its tmux session, and keeps every volume: $adopt"
+  fi
 }

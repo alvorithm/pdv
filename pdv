@@ -71,9 +71,11 @@ Policy flags
   --recreate         remove the main container before composing up, keeping
                      every volume.
 
-Instance verbs
-  acl [tree] | tune | slim [args] | fatten [args] | jobs [n] | report
-  repl [args] | testjvm <cmd> | eval [opts]
+Instance hygiene
+  acl [tree]   grant the container user write access to the bound tree
+               (rootless Docker); run does this before every start.
+  tune         post-start fixes and the image currency check, safe to
+               rerun; run does this after every start.
 
 Anything else is manage.sh verbatim: pdv <command> [args…] runs
 <checkout>/manage.sh <command> [args…].
@@ -205,15 +207,11 @@ EOF
 
   if [ "$WS" != "ws0" ]; then ws_briefing; fi
 
-  say "pre-start: devenv-acl"
+  say "pre-start: acl"
   why "rootless Docker: the container user cannot write a tree the host user owns until it is granted an ACL"
-  if [ -x "$ROOT/.devenv/devenv-acl" ]; then
-    local tree="$ROOT"
-    [ "$WS_INDEX" = 0 ] || tree="$PENPOT_WORKSPACES_DIR/$WS"
-    "$ROOT/.devenv/devenv-acl" "$tree" || warn "devenv-acl failed (non-fatal); watch tabs fail with EACCES if the container user cannot write $tree"
-  else
-    vsay "no ACL helper in $ROOT — skipping the grant"
-  fi
+  local tree="$ROOT"
+  [ "$WS_INDEX" = 0 ] || tree="$PENPOT_WORKSPACES_DIR/$WS"
+  grant_acl "$tree" || warn "acl failed (non-fatal); watch tabs fail with EACCES if the container user cannot write $tree"
 
   devenv_gpu=$gpu
   if $gpu; then check-devenv-gpu-support || exit 1; fi
@@ -347,11 +345,7 @@ wait_session() {
 }
 
 tune_if_available() {
-  if [ -x "$ROOT/.devenv/devenv-tune" ]; then
-    "$ROOT/.devenv/devenv-tune" "$CTR" || warn "devenv-tune failed (non-fatal)"
-  else
-    vsay "no tune helper in $ROOT — skipping post-start hygiene"
-  fi
+  tune_instance || warn "tune failed (non-fatal)"
 }
 
 start_selected() {
@@ -494,23 +488,20 @@ report_stale_network_for() {
 EOF
 }
 
-# ------------------------------------------------------------- delegation
-cmd_overlay() {
-  local name="$1"; shift
+# ------------------------------------------------------------------ hygiene
+cmd_acl() {
   manage_load
-  case "$name" in
-    acl)    local tree="$ROOT"; [ "$WS_INDEX" = 0 ] || tree="$PENPOT_WORKSPACES_DIR/$WS"
-            run_overlay devenv-acl "${REST[0]:-$tree}" ;;
-    tune)   run_overlay devenv-tune "$CTR" ;;
-    repl)   run_overlay start-repl.sh ${REST[@]+"${REST[@]}"} ;;
-    slim|fatten|jobs|report) run_overlay "devenv-$name" ${REST[@]+"${REST[@]}"} ;;
-    testjvm|eval)
-      if ! $WS_GIVEN; then
-        unset PENPOT_MAIN_CONTAINER_NAME
-        export DEVENV_CALLER_DIR="$CALLER_DIR"
-      fi
-      exec "$(overlay_script "devenv-$name")" ${REST[@]+"${REST[@]}"} ;;
-  esac
+  local tree="$ROOT"
+  [ "$WS_INDEX" = 0 ] || tree="$PENPOT_WORKSPACES_DIR/$WS"
+  [ "${#REST[@]}" -le 1 ] || svc_usage "acl: takes at most one tree argument"
+  grant_acl "${REST[0]:-$tree}"
+}
+
+cmd_tune() {
+  [ "${#REST[@]}" -eq 0 ] || svc_usage "tune: unexpected argument '${REST[0]}'"
+  manage_load
+  container_running "$CTR" || die "tune: $CTR is not running - bring it up with: pdv run --ws $WS_INDEX"
+  tune_instance
 }
 
 # ------------------------------------------------------------------- plan
@@ -557,9 +548,8 @@ main() {
     logs)           manage_load; exec "$ROOT/manage.sh" log-devenv --ws "$WS_INDEX" ;;
     status)         cmd_status ${REST[@]+"${REST[@]}"} ;;
     plan)           cmd_plan ${REST[@]+"${REST[@]}"} ;;
-    acl|tune|slim|just-backend|fatten|jobs|report|repl|testjvm|eval)
-                    if [ "$cmd" = "just-backend" ]; then cmd=slim; fi
-                    cmd_overlay "$cmd" ${REST[@]+"${REST[@]}"} ;;
+    acl)            cmd_acl ;;
+    tune)           cmd_tune ;;
     *)              manage_load; exec "$ROOT/manage.sh" ${original[@]+"${original[@]}"} ;;
   esac
 }

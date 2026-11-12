@@ -10,7 +10,7 @@ The command is `pdv`, and it lives in this repository. `pdv help` lists the verb
 
 A Penpot development instance is a Docker container with a tmux session inside it. Upstream's `manage.sh run-devenv` creates that container and runs `start-tmux.sh`, which fixes the window set: the frontend watcher, Storybook, the exporter, the backend, and, in agentic mode, the MCP server and Serena. pdv takes the window set over, because the selection, the heap cap, and the cache policy all live in the command that starts a window.
 
-Everything else stays upstream's. pdv loads `manage.sh` and calls its compose functions, so the ports, container names, volumes, network, and workspace paths come from the checkout rather than from a copy inside pdv. A verb pdv does not own is executed as `manage.sh <verb> <args>` with no translation. The instance verbs beside the window set are pdv's own commands, described later in this manual.
+Everything else stays upstream's. pdv loads `manage.sh` and calls its compose functions, so the ports, container names, volumes, network, and workspace paths come from the checkout rather than from a copy inside pdv. A verb pdv does not own is executed as `manage.sh <verb> <args>` with no translation. pdv calls no other script from the checkout: the two hygiene verbs, described later in this manual, are pdv's own code.
 
 The parity harness checks that the arrangement holds.
 
@@ -21,12 +21,12 @@ The parity harness checks that the arrangement holds.
 Instance ws0 binds the checkout pdv resolves: `--repo`, else `PENPOT_REPO`, else the Penpot worktree you call it from, else `~/Code/penpot`. Instance wsN binds `$PENPOT_WORKSPACES_DIR/wsN`, where the variable defaults to the XDG data directory when the legacy `~/.penpot/penpot_workspaces` does not exist. The slot wants a symlink to the worktree you mean:
 
 ```sh
-ln -s ~/Worktrees/penpot-graph ~/.local/share/penpot-devenv/workspaces/ws2
+ln -s ~/src/penpot-graph ~/.local/share/penpot-devenv/workspaces/ws2
 ```
 
 A real directory in the slot makes `manage.sh` rsync a clone instead, and commits made in the clone have to be fetched back. `pdv run --ws 2` prints which case it found before the container starts.
 
-An agent session started with `PENPOT_MCP_PORT` and `SERENA_MCP_PORT` set reaches the instance in the slot: the ports are `4401 + N × 10000` and `14181 + N × 10000`. `.mcp.json` reads those variables and falls back to ws0, so a session without them talks to ws0 whatever the worktree.
+An agent session reaches the instance in slot N through the ports `4401 + N × 10000` (Penpot MCP) and `14181 + N × 10000` (Serena). `./manage.sh start-coding-agent <client> --ws N` starts a coding agent with those ports wired into its MCP configuration.
 
 ## Instances share one database
 
@@ -82,19 +82,17 @@ A container that cannot come up reports its state (`status`, `running`, `exit`, 
 
 A start waits for four things before it reports success: the container in the running state, a five-second settle after that, an answer from the health endpoint on port 8082, and the tmux session. The settle catches nginx dying just after Docker reports the container as running.
 
-## The instance verbs beside the window set
+## Two hygiene verbs prepare the tree and the container
 
-`pdv slim` stops the three watcher windows and keeps the backend, and `pdv fatten` starts them again in the same windows. A connected REPL survives both, because neither touches the backend.
+`pdv acl` grants the container user write access to the bound tree. Rootless Docker maps the image's `penpot` user to a subordinate uid, which the host treats as `other` on a tree the host user owns, so every dependency install in the watcher windows fails with `EACCES`. pdv measures that uid with a one-shot container, grants it a read-write ACL and a default ACL on every entry the host user owns, and proves the grant by writing from inside a container. A rootful daemon maps the uid one to one, and the verb then reports that it has nothing to grant. `run` applies the grant before every start. A wsN slot that `manage.sh` fills with a copy does not exist before the first start, so grant the copy with `pdv acl --ws N` once it exists, or symlink a worktree into the slot beforehand.
 
-`pdv acl` grants the container user write access to the bound tree, which is what a fresh worktree needs before its first dependency install. `pdv tune` is the post-start hygiene and is safe to run again at any time.
-
-`pdv testjvm start` keeps a backend test JVM alive between runs, with `stop`, `restart`, `run`, and `log` beside it. `pdv eval` evaluates Clojure over the same bridge, in that JVM by default or in the running backend. `pdv repl` starts the host nREPL bridge for an editor. `pdv jobs` prints the instance's recent job-table rows, and `pdv report` prints the checklist to hand to a bug reporter.
+`pdv tune` runs after every start and is safe to run again. It hands the image's root-owned Cargo home (`/opt/cargo`) to the container user, because a render-wasm build that must fetch a crate missing from the vendored set otherwise fails with `Permission denied`. It also compares the running container's image with the local image and the local image with the registry, and prints the adoption command when either is stale.
 
 ## The parity harness is the net every behaviour change lands behind
 
-`test/parity.sh` has two modes. The offline mode reads the window plan out of the checkout's own `start-tmux.sh` and compares it with pdv's plan, then asserts the service rules, the cache policy, and the heap cap without touching a container. The live mode records a reference instance and a pdv instance of the same workspace, and compares the container state, the published ports, the mounts, and the tmux window set. With `--fast`, the live mode also proves that `--recreate` keeps every named volume, that a JVM carries the cap in its environment, and that `status` reports a stopped instance.
+`test/parity.sh` has two modes. The offline mode reads the window plan out of the checkout's own `start-tmux.sh` and compares it with pdv's plan, then asserts the service rules, the cache policy, and the heap cap without touching a container. The live mode brings the same workspace up twice, with `pdv run` and with `./manage.sh run-devenv`, and compares the container state, the published ports, the mounts, and the tmux window set. A bare `pdv run` claims to be the upstream instance, so upstream is the reference. pdv runs first, because its ACL grant is what lets the upstream instance build on a rootless daemon. With `--fast`, the live mode also proves that `--recreate` keeps every named volume, that a JVM carries the cap in its environment, and that `status` reports a stopped instance.
 
-The live mode needs the reference tooling in the checkout and agentic mode there, so pass `--plain` when `frontend/resources/public/js/config.js` is absent.
+The live mode runs in agentic mode by default, so pass `--plain` when `frontend/resources/public/js/config.js` is absent.
 
 The live mode removes the instance's container before each recording. Run it against a workspace nobody is using, never against an instance you are working in.
 

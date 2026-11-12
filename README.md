@@ -2,13 +2,14 @@
 
 Penpot's `manage.sh run-devenv` starts four windows at once: the frontend watcher, Storybook, the exporter, and the backend, plus the MCP and Serena windows in agentic mode. On a laptop, four windows mean more heap and more compiling than the work needs. pdv starts the windows you name, caps the heap of the three JVMs those windows start, and keeps the compile caches between restarts.
 
-pdv owns the instance bring-up and the window set. It also carries the verbs that act on a running instance: `acl`, `tune`, `slim`, `fatten`, `jobs`, `report`, `repl`, `testjvm`, and `eval`. Any other `manage.sh` verb runs unchanged, so `pdv pull-devenv` is `manage.sh pull-devenv` and an upstream flag works here on the day it lands.
+pdv owns the instance bring-up and the window set, plus two hygiene verbs that `run` also applies on its own: `acl` and `tune`. Any other `manage.sh` verb runs unchanged, so `pdv pull-devenv` is `manage.sh pull-devenv` and an upstream flag works here on the day it lands. pdv depends on nothing but the checkout's `manage.sh` and the files the Penpot devenv image ships.
 
 ## Requirements
 
 - Docker, rootless or rootful, with the Penpot devenv image (`./manage.sh pull-devenv`).
 - A Penpot checkout that carries `manage.sh`.
 - bash 4 or newer on the host.
+- `setfacl` (the `acl` package) on a rootless Docker host.
 
 ## Install
 
@@ -92,18 +93,11 @@ pdv logs                        # follow the container log
 
 `start` and `stop` with a selector act on windows. `stop` without a selector is the instance stop. No pdv verb attaches to a container to report a failure: a failed start reports the container's state and the last log lines, and a tmux session that does not appear within 120 seconds reports the last 40.
 
-## The instance verbs
+## The hygiene verbs
 
 ```sh
-pdv slim                        # stop the watcher windows, keep the backend
-pdv fatten                      # bring them back in the same windows
-pdv tune                        # post-start hygiene, safe to rerun
 pdv acl                         # grant the container user write access to the tree
-pdv testjvm start               # a persistent backend test JVM
-pdv eval '(+ 1 2)'              # evaluate Clojure in that JVM
-pdv repl                        # the nREPL bridge for editors
-pdv jobs 20                     # the instance's job-table rows
-pdv report                      # the bug-reporter checklist
+pdv tune                        # post-start fixes and the image currency check, safe to rerun
 ```
 
 ## Troubleshooting
@@ -119,9 +113,9 @@ pdv report                      # the bug-reporter checklist
 
 ## The manual and the harness carry the detail
 
-`pdv help` lists the commands and flags it owns. [The manual](docs/manual-pdv.md) explains the service model, the heap channel, the cache policy, the recreate path, the instance verbs, and the parity harness.
+`pdv help` lists the commands and flags it owns. [The manual](docs/manual-pdv.md) explains the service model, the heap channel, the cache policy, the recreate path, the hygiene verbs, and the parity harness.
 
-The parity harness checks the contract in two modes. The offline mode reads the window plan, the service rules, the cache policy, and the heap cap out of the checkout and compares them with pdv's. The live mode compares a real pdv instance with a reference instance of the same workspace and tears both down.
+The parity harness checks the contract in two modes. The offline mode reads the window plan, the service rules, the cache policy, and the heap cap out of the checkout and compares them with pdv's. The live mode brings the same workspace up with `pdv run` and with `./manage.sh run-devenv`, compares the two instances, and tears both down.
 
 ```sh
 ./test/parity.sh                       # offline: plan, services, caps, caches

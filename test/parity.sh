@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# parity.sh — the regression net for pdv: the same instance as the reference
-# dispatcher, asserted mechanically.
+# parity.sh — the regression net for pdv: the same instance as upstream's
+# manage.sh run-devenv, asserted mechanically.
 #
 # Offline (default): pdv's window plan against the plan start-tmux.sh creates,
 # plus the service, cache, heap and selector rules. No container is touched.
 #
-# Live (--live): for each workspace, bring the instance up with
-# the reference dispatcher run and again with pdv run, then compare the container state,
-# the published ports and the tmux window set. With --fast, also prove the
+# Live (--live): for each workspace, bring the instance up with pdv run and
+# again with ./manage.sh run-devenv, then compare the container state, the
+# published ports, the mounts and the tmux window set. A bare pdv run claims
+# to be the upstream instance, so upstream is the reference. pdv runs first
+# because it grants the ACL a rootless daemon needs, which upstream does not.
+# With --fast, also prove the
 # adoption rules that only a running instance can show: --recreate keeps the
 # volumes, the heap cap reaches the JVMs, and status reports a stopped
 # instance without attaching.
@@ -67,7 +70,6 @@ for cand in "$REPO" "$(git rev-parse --show-toplevel 2>/dev/null)" "$HOME/Code/p
 done
 [ -n "${ROOT:-}" ] || { echo "parity: no Penpot checkout (pass --repo PATH)" >&2; exit 2; }
 
-REFERENCE="$ROOT/.devenv/devenv"
 START_TMUX="$ROOT/docker/devenv/files/start-tmux.sh"
 AGENTIC_FLAG=""; $AGENTIC && AGENTIC_FLAG="--agentic"
 if $AGENTIC && [ ! -f "$ROOT/frontend/resources/public/js/config.js" ]; then
@@ -241,15 +243,19 @@ check_heap_cap() {
 }
 
 check_instance_validation() {
-  local out rc
-  out=$("$REFERENCE" run --ws 9 2>&1); rc=$?
-  if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'caps workspaces at 5'; then
-    ok "reference refuses --ws 9"
+  local out rc gcfg max
+  max=$(sed -n 's/^PENPOT_MAX_WS_INDEX=\([0-9][0-9]*\).*/\1/p' "$ROOT/manage.sh" | head -1)
+  # manage.sh appends safe.directory to the global git config on every run.
+  gcfg=$(mktemp "${TMPDIR:-/tmp}/parity-gitconfig.XXXXXX")
+  out=$( cd "$ROOT" && GIT_CONFIG_GLOBAL="$gcfg" ./manage.sh run-devenv --ws 9 2>&1 ); rc=$?
+  rm -f "$gcfg"
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "max supported is --ws $max"; then
+    ok "manage.sh refuses --ws 9 at its ceiling of $max"
   else
-    bad "reference --ws 9 did not refuse as expected (rc=$rc)"
+    bad "manage.sh --ws 9 did not refuse as expected (rc=$rc)"
   fi
   out=$("$PDV" plan --ws 9 2>&1); rc=$?
-  if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'caps workspaces at 5'; then
+  if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "caps workspaces at $max"; then
     ok "pdv refuses --ws 9 with manage.sh's ceiling"
   else
     bad "pdv --ws 9 did not refuse as expected (rc=$rc)"
@@ -311,7 +317,15 @@ run_tool() {
   local tool="$1" n="$2" log="$3"
   case "$tool" in
     reference)
-      ( cd "$ROOT" && "$REFERENCE" run --ws "$n" $AGENTIC_FLAG ) >"$log" 2>&1 ;;
+      # manage.sh appends safe.directory to the global git config on every
+      # run; a snapshot keeps the harness from growing that file.
+      local gcfg
+      gcfg=$(mktemp "${TMPDIR:-/tmp}/parity-gitconfig.XXXXXX")
+      if [ -f "$HOME/.config/git/config" ]; then cp "$HOME/.config/git/config" "$gcfg"; fi
+      ( cd "$ROOT" && GIT_CONFIG_GLOBAL="$gcfg" ./manage.sh run-devenv --ws "$n" $AGENTIC_FLAG ) >"$log" 2>&1
+      local rc=$?
+      rm -f "$gcfg"
+      return "$rc" ;;
     pdv)
       ( cd "$ROOT" && "$PDV" run --ws "$n" $AGENTIC_FLAG ) >"$log" 2>&1 ;;
   esac
@@ -337,12 +351,12 @@ check_live_ws() {
   local n="$1" o p
   o=$(mktemp); p=$(mktemp)
   local ol="$o.log" pl="$p.log"
-  if ! recording reference "$n" "$ol" "$o"; then rm -f "$o" "$p" "$ol" "$pl"; return 1; fi
   if ! recording pdv "$n" "$pl" "$p"; then rm -f "$o" "$p" "$ol" "$pl"; return 1; fi
+  if ! recording reference "$n" "$ol" "$o"; then rm -f "$o" "$p" "$ol" "$pl"; return 1; fi
   if diff -u "$o" "$p" >/tmp/parity-live-$n.diff 2>&1; then
-    ok "ws$n: container state, published ports and window set match the reference dispatcher"
+    ok "ws$n: container state, published ports, mounts and window set match manage.sh run-devenv"
   else
-    bad "ws$n: pdv differs from the reference dispatcher"
+    bad "ws$n: pdv differs from manage.sh run-devenv"
     sed 's/^/     /' "/tmp/parity-live-$n.diff"
   fi
   rm -f "$o" "$p" "$ol" "$pl"
@@ -407,7 +421,6 @@ if [ "$MODE" = "offline" ]; then
   check_heap_cap
   check_instance_validation
 else
-  [ -x "$REFERENCE" ] || { echo "parity: no $REFERENCE (install the reference tooling first)" >&2; exit 2; }
   IFS=',' read -ra WS_LIST <<<"$WSD"
   for n in "${WS_LIST[@]}"; do
     check_live_ws "$n"
