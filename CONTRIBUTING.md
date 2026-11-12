@@ -31,15 +31,9 @@ In Penpot: both scripts append to an existing `JAVA_OPTS` instead of replacing i
 
 ### A watcher restart keeps its caches
 
-pdv today: `watch:app` in `frontend/package.json` runs `clear:shadow-cache`, `clear:wasm`, and `build:wasm` before every watcher start, and the wasm rebuild takes minutes. pdv starts the same watcher processes without those steps, builds wasm only when `render-wasm.wasm` is missing, and restores the full sequence with `--clean`.
+pdv today: `watch:app` in `frontend/package.json` runs `clear:shadow-cache`, `clear:wasm`, and `build:wasm` before every watcher start, and the wasm rebuild takes minutes. pdv starts the same watcher processes without those steps, builds wasm only when `render-wasm.wasm` is missing, and restores the full sequence with `--clean`. Because pdv starts those processes directly instead of through `./scripts/watch`, it also runs `./scripts/setup` first when the service's `node_modules` is missing.
 
-In Penpot: `watch:app` keeps the caches and builds wasm only when its artifact is missing, and a separate `watch:app:clean` script runs the full sequence. pdv then calls `./scripts/watch app` like every other window.
-
-### A window installs its own dependencies
-
-pdv today: because pdv starts the frontend watcher processes directly instead of through `./scripts/watch`, it runs `./scripts/setup` first when the service's `node_modules` is missing.
-
-In Penpot: nothing beyond the cache change above. Once pdv calls `./scripts/watch app`, the script's own `pnpm install` covers the dependencies, and the check goes away.
+In Penpot: `watch:app` keeps the caches and builds wasm only when its artifact is missing, and a separate `watch:app:clean` script runs the full sequence. pdv then calls `./scripts/watch app` like every other window, the script's own `pnpm install` covers the dependencies, and the `node_modules` check goes away.
 
 ### A container on a dead network is recreated
 
