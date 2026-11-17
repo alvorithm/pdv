@@ -650,7 +650,10 @@
     []))
 
 (defn- cmd-hash []
+  ;; backend_heap tunes the JVM, not the data, so changing it must not drop the
+  ;; database. A profile without the key hashes exactly as before it existed.
   (let [{:keys [text]} (load-profile)
+        text (str/replace text #"(?m)^backend_heap:[^\n]*\n?" "")
         parts (concat [(str "profile\t" text)]
                       (map (fn [[rel p]] (str "file\t" rel "\t" (sha256-file p)))
                            (staged-repo-files))

@@ -115,7 +115,7 @@ The cap reaches the window commands pdv sends, and not a release build or the te
 
 `--java-opts` replaces the value, `DEVENV_JAVA_OPTS` sets the same value from the environment, and an explicitly empty value (`--java-opts ""`) removes the cap.
 
-A seed profile can raise the backend's heap alone with `backend_heap: "2g"`, because hub files import into the backend JVM and 768 MiB is too little for some of them. The backend window then starts with `-Xmx2g -Xms50m`, and the other windows keep the default. `--java-opts` and `DEVENV_JAVA_OPTS` still win over the profile. pdv reads the value when it stages the profile and remembers it in the worktree's git directory as `pdv-heap`, so `pdv start --services backend` gives the backend the same heap. A backend that was already running keeps its heap, and `pdv run` prints the restart command when that heap differs. `pdv seed` restarts the backend, so it applies the new heap itself.
+A seed profile can raise the backend's heap alone with `backend_heap: "2g"`, because hub files import into the backend JVM and 768 MiB is too little for some of them. The backend window then starts with `-Xmx2g -Xms50m`, and the other windows keep the default. `--java-opts` and `DEVENV_JAVA_OPTS` still win over the profile. pdv reads the value when it stages the profile and remembers it in the worktree's git directory as `pdv-heap`, so `pdv start --services backend` gives the backend the same heap. The key is left out of the profile's input hash, so changing it never rebuilds the database. A backend that was already running keeps its heap, and `pdv run` prints the restart command when that heap differs. `pdv seed` restarts the backend, so it applies the new heap itself.
 
 ## The admin-console is off, because no devenv runs one
 
