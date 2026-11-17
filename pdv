@@ -4,8 +4,9 @@
 # A thin dispatcher over the checkout's manage.sh: every command pdv does not
 # own falls through to manage.sh verbatim, so upstream changes cost nothing
 # here. pdv owns the instance bring-up with a service selection, the JVM heap
-# caps, a cache-preserving frontend watcher, failure reports that need no
-# attach, and the stale-network escape hatch.
+# caps, a cache-preserving frontend watcher, the per-worktree database and its
+# seed, failure reports that need no attach, and the stale-network escape
+# hatch.
 #
 # Usage: pdv <command> [options]   (pdv help prints the command list)
 #
@@ -21,6 +22,7 @@ set -euo pipefail
 PDV_SELF=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 . "$PDV_SELF/lib/pdv-core.sh"
 . "$PDV_SELF/lib/pdv-services.sh"
+. "$PDV_SELF/lib/pdv-seed.sh"
 
 CALLER_DIR=$PWD
 
@@ -38,7 +40,8 @@ Instances
   run     [--services LIST] [--only-backend] [--clean] [--recreate]
           [--java-opts OPTS] [--agentic] [--attach] [--gpu] [--sync]
           [--serena-context CTX] [--opencode-config-dir DIR]
-          [--git-user-name NAME] [--git-user-email EMAIL] [-e KEY=VAL]
+          [--git-user-name NAME] [--git-user-email EMAIL]
+          [--seed NAME|none] [--db NAME] [-e KEY=VAL]
           Bring a workspace up with the requested service windows.
   start   [--services LIST | --watchers] [--java-opts OPTS] [--clean]
           Start windows of a running instance (or restart stopped ones).
@@ -71,6 +74,21 @@ Policy flags
   --recreate         remove the main container before composing up, keeping
                      every volume.
 
+Seed (one database and one bucket per worktree)
+  --seed NAME|none   profile in the fixture repository to seed this worktree's
+                     database from. `none` forgets the name: the built-in
+                     default users only. Remembered in the worktree's git dir.
+  --db NAME          database for this worktree instead of pdvwt_<slug>, with
+                     the bucket NAME and every _ turned into -. `--db penpot`
+                     is the shared legacy database, which pdv never seeds.
+                     `--db default` forgets the choice. Remembered likewise.
+  seed [NAME]        rebuild the database from the profile and seed it again;
+                     NAME changes the remembered profile first.
+  seed status        the profile, hash, seeded-at, schema head, and files.
+  bundle save <relpath> --project NAME [--team NAME]
+                     export a project into the fixture repository; never
+                     commits.
+
 Instance hygiene
   acl [tree]   grant the container user write access to the bound tree
                (rootless Docker); run does this before every start.
@@ -92,6 +110,13 @@ Environment
                           enable-admin-console here wins
                           (default enable-mcp when agentic, else none)
   PDV_TMUX_MOUSE=1        tune turns the tmux mouse on
+  PDV_FIXTURES            fixture repository checkout for the seed profiles
+                          (default ~/Code/penpot-fixtures)
+  PDV_SEED_DEFAULT        profile name for a worktree that chose none
+  PDV_SEED_TIMEOUT        seconds to wait for the backend before a seed
+                          gives up (default 900)
+  Any PDV_* variable can also live in ${XDG_CONFIG_HOME:-~/.config}/pdv/env,
+  one PDV_NAME=value per line (a leading ~/ expands); the environment wins.
 
 Debug
   plan [same service flags]   print the window plan, one
@@ -155,6 +180,10 @@ cmd_run() {
       --opencode-config-dir) i=$((i+1)); opencode_dir="${args[$i]:-}" ;;
       --git-user-name)  i=$((i+1)); git_name="${args[$i]:-}" ;;
       --git-user-email) i=$((i+1)); git_email="${args[$i]:-}" ;;
+      --seed)       i=$((i+1)); SEED_ARG="${args[$i]:-}"; SEED_ARG_SET=true ;;
+      --seed=*)     SEED_ARG="${a#--seed=}"; SEED_ARG_SET=true ;;
+      --db)         i=$((i+1)); DB_ARG="${args[$i]:-}"; DB_ARG_SET=true ;;
+      --db=*)       DB_ARG="${a#--db=}"; DB_ARG_SET=true ;;
       -e)           i=$((i+1)); extra_env+=(-e "${args[$i]:-}") ;;
       -e*)          extra_env+=(-e "${a#-e}") ;;
       --services|--services=*|--only-backend|--watchers|--agentic|--clean|--java-opts|--java-opts=*)
@@ -216,8 +245,27 @@ cmd_run() {
 
   if container_running "$CTR"; then
     say "run: $CTR is already up — not restarting it"
+    seed_resolve_selection
+    seed_persist_selection || true
+    seed_sweep_orphans || warn "sweep: orphaned per-worktree databases were not checked"
+    seed_export_tmux_env
     tune_if_available
     start_selected
+    local rebuilt=false
+    if $SEED_ENABLED; then
+      if seed_stage_all; then
+        if seed_db_stale; then
+          if seed_rebuild; then
+            rebuilt=true
+          else
+            warn "seed: $PDV_DB could not be rebuilt; the instance is unchanged"
+          fi
+        fi
+      else
+        warn "seed: staging the profile failed; retry with: pdv seed --ws $WS_INDEX"
+      fi
+    fi
+    if $rebuilt || seed_backend_on_pdv_db; then seed_after_start || true; fi
     finish_hints
     if $attach; then attach_now; fi
     return 0
@@ -239,6 +287,9 @@ cmd_run() {
   say "network + shared infra"
   ensure-devenv-network
   ensure-infra-up
+  # A worktree that is gone takes its database and bucket with it. Best
+  # effort: an unreachable postgres must not stop a start.
+  seed_sweep_orphans || warn "sweep: orphaned per-worktree databases were not checked"
   ensure-instance-test-database "$WS"
 
   if [ "$WS" != "ws0" ]; then
@@ -271,10 +322,25 @@ cmd_run() {
     docker exec "$CTR" sudo -u penpot git config --global user.email "$git_email" || true
   fi
 
+  # The worktree's own database and bucket: the profile stages into the
+  # container and hashes before any window exists, and a hash that differs
+  # from the seeded one rebuilds the database before migrations run.
+  seed_resolve_selection
+  seed_persist_selection || true
+  if $SEED_ENABLED; then
+    say "seed: staging the profile '${SEED_PROFILE:-default}' for $PDV_DB (bucket $PDV_BUCKET)"
+    why "the backend window carries PENPOT_DATABASE_URI and PENPOT_OBJECTS_STORAGE_S3_BUCKET, and its migrations run against the database this worktree's branch expects"
+    seed_stage_all || die "seed: staging the profile failed; no window was launched"
+    seed_ensure_database || die "seed: the database $PDV_DB could not be prepared; no window was launched"
+  else
+    say "seed: $PDV_DB is the shared database (bucket $PDV_BUCKET); pdv seeds nothing"
+  fi
+
   launch_windows
   say "waiting for tmux session '$SESSION' in $CTR (≤120 s)"
   wait_session
   tune_if_available
+  seed_after_start || true
   finish_hints
 
   if $attach; then
@@ -393,6 +459,7 @@ cmd_start() {
   take_service_flags "$@"
   [ "${#REST[@]}" -eq 0 ] || svc_usage "start: unexpected argument '${REST[0]}'"
   manage_load
+  seed_resolve_selection
   load_selection
   require_storybook_pairing
   if ! container_running "$CTR"; then
@@ -420,6 +487,9 @@ cmd_stop() {
     fi
     manage_load
     if $all; then
+      # What is not exported disappears with the worktree: sweep the databases
+      # whose worktree is gone before the shared infra comes down. Best effort.
+      seed_sweep_orphans || warn "sweep: orphaned per-worktree databases were not checked"
       # shellcheck disable=SC2046  # container names carry no spaces
       remove_stopped_instances $(devenv_containers)
       exec "$ROOT/manage.sh" stop-devenv --all
@@ -477,6 +547,7 @@ status_instance() {
     branch=$(git -C "$tree" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
     sub "branch:  $branch"
   fi
+  seed_instance_line "$tree"
   if [ "$running" != "true" ]; then
     if stopped_cleanly "$name"; then
       # Stopped outside pdv (a daemon restart, a host shutdown): nothing is
@@ -535,7 +606,9 @@ cmd_tune() {
 # ------------------------------------------------------------------- plan
 cmd_plan() {
   take_service_flags "$@"
+  manage_load
   load_selection
+  seed_resolve_selection
   require_storybook_pairing
   render_plan
 }
@@ -575,6 +648,8 @@ main() {
     attach)         manage_load; exec "$ROOT/manage.sh" attach-devenv --ws "$WS_INDEX" ;;
     logs)           manage_load; exec "$ROOT/manage.sh" log-devenv --ws "$WS_INDEX" ;;
     status)         cmd_status ${REST[@]+"${REST[@]}"} ;;
+    seed)           cmd_seed ${REST[@]+"${REST[@]}"} ;;
+    bundle)         cmd_bundle ${REST[@]+"${REST[@]}"} ;;
     plan)           cmd_plan ${REST[@]+"${REST[@]}"} ;;
     acl)            cmd_acl ;;
     tune)           cmd_tune ;;

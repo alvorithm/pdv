@@ -4,7 +4,7 @@ genre: manual
 
 # pdv runs one Penpot instance with the windows and the memory budget the work needs
 
-The command is `pdv`, and it lives in this repository. `pdv help` lists the verbs and flags it owns. This manual states the intent behind them: which window a service owns, which channel carries the heap cap, what a restart costs, and what to do when a container will not come up.
+The command is `pdv`, and it lives in this repository. `pdv help` lists the verbs and flags it owns. This manual states the intent behind them: which window a service owns, which database and bucket a worktree writes to, which channel carries the heap cap, what a restart costs, and what to do when a container will not come up.
 
 ## One command owns the window set, and manage.sh owns everything else
 
@@ -28,13 +28,67 @@ A real directory in the slot makes `manage.sh` rsync a clone instead, and commit
 
 An agent session reaches the instance in slot N through the ports `4401 + N × 10000` (Penpot MCP) and `14181 + N × 10000` (Serena). `./manage.sh start-coding-agent <client> --ws N` starts a coding agent with those ports wired into its MCP configuration.
 
-## Instances share one database
+## Each worktree gets its own database and bucket
 
-Each workspace gets its own container, home volume, published ports, Redis index, and tenant. It does not get its own database or object store: `PENPOT_DATABASE_URI` points at one PostgreSQL database and the S3 object store is shared, so a user, a project, or a migration created in one instance is visible from every instance.
+Every instance used to share the `penpot` database and the `penpot` bucket that `docker/devenv/defaults.env` configures, so two worktrees on branches with different migrations ran against one schema. pdv now gives each bound worktree a database and a bucket of its own.
 
-Every backend migrates that database at boot. Migration steps are keyed by module and step name, so an older branch starts normally against a schema that a newer branch migrated. The hazard is a later upstream migration that reuses a number with different SQL, because the step is skipped when the name already has a row. Watch for it when a rebase brings new migration files.
+The name comes from the worktree directory, not from the ws number: the basename is lower-cased, every run of characters outside `a-z0-9` becomes `_`, the result is trimmed of `_` and cut to 40 characters, and the database is `pdvwt_<slug>` with the bucket `pdvwt-<slug>`. `penpot-iop-vc-preview` therefore becomes the database `pdvwt_penpot_iop_vc_preview` and the bucket `pdvwt-penpot-iop-vc-preview`. The worktree directory is the one the container binds, so a wsN slot that symlinks a worktree is named after the worktree, while a real directory in the slot is named after the slot.
 
-The test database is the exception: the instance overrides name `penpot_test` on ws0 and `penpot_test_wsN` on wsN.
+### A profile is what goes into the database
+
+A profile is one YAML file in the fixture repository, `$PDV_FIXTURES/profiles/<name>.yaml` (`PDV_FIXTURES` defaults to `~/Code/penpot-fixtures`). It lists these keys:
+
+- `users`: every account with its `email` and `fullname`, an optional `password` (default `123123`), an optional `password_file` naming a host JSON file whose `password` field wins, and `agent: true` for the account pdv mints an access token for.
+- `teams`: every team with its members and each member's role (`owner`, `admin`, `editor`, or `viewer`).
+- `bundles`: the files to import, each one either a path in the fixture repository or a source such as `git+https://github.com/<owner>/<repo>@<rev>#<path>`, with an optional team and project.
+- `generators`: programs in the repository that create files, with their arguments and target project.
+
+The driver `share/pdv-seed.bb` runs in the container and stages what the profile names. The engine `share/seed.clj` is loaded into the running backend, where it creates the users, teams, and files with Penpot's own commands, imports each bundle, and records every import with its hash. A project a seed creates is named `<project> · schema <last applied migration>`, so a fixture states which schema it was made against.
+
+```sh
+pdv run --seed branching              # profiles/branching.yaml seeds this worktree
+pdv run --seed none                   # forget the name, keep the built-in default users
+PDV_SEED_DEFAULT=branching pdv run    # the profile for every worktree that chose none
+```
+
+Without a named profile the database still gets pdv's built-in one, `share/default-profile.yaml`: `developer@example.com` owns a `Developers` team, `agent@example.com` is an editor whose token pdv mints, and nothing is imported. That file is also the shortest working example of the profile schema.
+
+A developer who wants their own default for every worktree writes it once in `${XDG_CONFIG_HOME:-~/.config}/pdv/env`, one `PDV_NAME=value` per line, for example `PDV_SEED_DEFAULT=default` and `PDV_FIXTURES=~/Code/penpot-fixtures`. pdv reads only `PDV_*` names there, expands a leading `~/`, and lets the environment override the file.
+
+The name is remembered in the worktree's own git directory, in a file called `pdv-seed`, so it belongs to that worktree and never shows in `git status`. An explicit `--db NAME` is remembered the same way in `pdv-db`.
+
+### The database lives as long as its worktree
+
+`pdv run` creates the database before the backend starts, the way `manage.sh::ensure-instance-test-database` creates the test database, and records `worktree_path` and `created_at` in a `pdv_meta` table. The backend's migrations ignore a table they do not know. The bucket is created by `backend/scripts/_env::setup_s3_bucket` when the backend starts.
+
+The seed itself runs after the backend answers: pdv waits for the backend's nREPL on port 6064 inside the container, then for the applied migrations to settle, then applies the profile through that nREPL. Port 6063 is Penpot's JSON command REPL (`app.srepl/json-repl`), which takes one JSON command per line and cannot evaluate Clojure forms.
+
+A second run with the same profile imports nothing. pdv computes an input hash over the profile text, every staged fixture file, and every remote source, and compares it with the hash the last seed recorded. When it differs, pdv drops the database, empties the bucket, recreates the database, and only then starts the backend, because an import always assigns new file ids and a merge into the old database would leave both sets behind.
+
+The database survives `pdv stop`. It disappears with the worktree: before a `pdv run` and before `pdv stop --all` brings the shared infrastructure down, pdv sweeps the `pdvwt_*` databases whose recorded `worktree_path` no longer exists and removes their buckets. The sweep is best effort, so an unreachable postgres or object store warns and the rest of the command continues. What is not exported disappears with the worktree.
+
+```sh
+pdv seed                    # rebuild this instance's database and seed it again
+pdv seed branching          # switch the profile, then rebuild
+pdv seed status             # profile, hash, seeded-at, schema head, files per source
+pdv bundle save bundles/branching/review-pair.penpot --project review-pair
+```
+
+`pdv seed` is the manual rebuild: it stops the backend window, drops and recreates the database, empties the bucket, starts the backend again, and seeds. `pdv bundle save` exports a project, libraries included, into the fixture repository and prints the `git add` and `git commit` commands. It never commits.
+
+### The backend window carries the database and the bucket
+
+The backend window command starts with `PENPOT_DATABASE_URI=postgresql://postgres/<db>` and `PENPOT_OBJECTS_STORAGE_S3_BUCKET=<bucket>`, beside the heap cap and the admin-console flag, and pdv sets both in the tmux session environment. A pane that restarts `./scripts/start-dev` by hand therefore lands on the same database and bucket the window would.
+
+After a seed that has an agent user, pdv copies the credentials out to `<tree>/.pdv-agent.json`, mode 600, and adds `/.pdv-agent.json` to `<git-common-dir>/info/exclude` so it never appears in `git status`. The file holds the URL, the account's email, its access token, and the database name.
+
+### `--db penpot` is the escape to the shared database
+
+The shared database is still there, and `pdv run --db penpot` uses it with the `penpot` bucket. pdv never creates, seeds, drops or sweeps it, so an instance on it behaves exactly as every instance did before this change: a user, a project, or a migration created in one instance is visible from every instance that shares it. Reach for it when data must cross instance boundaries, and for anything else prefer the worktree's own database.
+
+The migration hazard lives there. Every backend migrates that one schema at boot, migration steps are keyed by module and step name, so an older branch starts normally against a schema that a newer branch migrated. The risk is a later upstream migration that reuses a number with different SQL, because the step is skipped when the name already has a row. Watch for it when a rebase brings new migration files.
+
+The test database is separate either way: the instance overrides the name `penpot_test` on ws0 and `penpot_test_wsN` on wsN.
 
 ## A service is a window, and storybook also names a compile target
 
@@ -103,7 +157,7 @@ A start waits for four things before it reports success: the container in the ru
 
 ## The parity harness is the net every behaviour change lands behind
 
-`test/parity.sh` has two modes. The offline mode reads the window plan out of the checkout's own `start-tmux.sh` and compares it with pdv's plan, then asserts the service rules, the cache policy, and the heap cap without touching a container. The live mode brings the same workspace up twice, with `pdv run` and with `./manage.sh run-devenv`, and compares the container state, the published ports, the mounts, and the tmux window set. A bare `pdv run` claims to be the upstream instance, so upstream is the reference. pdv runs first, because its ACL grant is what lets the upstream instance build on a rootless daemon. With `--fast`, the live mode also proves that `--recreate` keeps every named volume, that a JVM carries the cap in its environment, and that `status` reports a stopped instance.
+`test/parity.sh` has two modes. The offline mode reads the window plan out of the checkout's own `start-tmux.sh` and compares it with pdv's plan, then asserts the service rules, the cache policy, the heap cap, and the seed naming rules without touching a container. The live mode brings the same workspace up twice, with `pdv run` and with `./manage.sh run-devenv`, and compares the container state, the published ports, the mounts, and the tmux window set. A bare `pdv run` claims to be the upstream instance, so upstream is the reference. pdv runs first, because its ACL grant is what lets the upstream instance build on a rootless daemon. With `--fast`, the live mode also proves that `--recreate` keeps every named volume, that a JVM carries the cap in its environment, and that `status` reports a stopped instance.
 
 The live mode runs in agentic mode by default, so pass `--plain` when `frontend/resources/public/js/config.js` is absent.
 

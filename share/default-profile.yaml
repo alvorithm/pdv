@@ -1,0 +1,16 @@
+# pdv's built-in profile: what a worktree database carries when no profile
+# from the fixture repository is named. No bundles and no generators, so the
+# first start is an empty workspace with a developer and an agent account.
+description: The default users of a worktree database, with no fixtures
+users:
+  - email: developer@example.com
+    fullname: Developer
+  - email: agent@example.com
+    fullname: Agent
+    agent: true
+teams:
+  - name: Developers
+    members:
+      - {email: developer@example.com, role: owner}
+      - {email: agent@example.com, role: editor}
+bundles: []

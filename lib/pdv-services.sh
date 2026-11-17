@@ -159,7 +159,9 @@ window_command() {
 # later, so a developer's `enable-admin-console` there still wins. The `$` is
 # literal here: the container shell expands it.
 backend_prefix() {
-  printf '%s ' 'PENPOT_FLAGS="${PENPOT_FLAGS:-} disable-admin-console"'
+  printf '%s ' "PENPOT_DATABASE_URI=postgresql://postgres/${PDV_DB:-penpot}" \
+                "PENPOT_OBJECTS_STORAGE_S3_BUCKET=${PDV_BUCKET:-penpot}" \
+                'PENPOT_FLAGS="${PENPOT_FLAGS:-} disable-admin-console"'
 }
 
 # The exporter window carries a second pane that waits for the build.
@@ -203,6 +205,13 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
 fi
 tmux -2 new-session -d -s "$SESSION"
 HEAD
+  # The worktree's database and bucket belong to the session as well: a pane
+  # that restarts the backend by hand must land on the same ones the window
+  # command carries. lib/pdv-seed.sh owns both values.
+  printf 'tmux set-environment -t "$SESSION" PENPOT_DATABASE_URI %q\n' \
+    "postgresql://postgres/${PDV_DB:-penpot}"
+  printf 'tmux set-environment -t "$SESSION" PENPOT_OBJECTS_STORAGE_S3_BUCKET %q\n' \
+    "${PDV_BUCKET:-penpot}"
   if needs_frontend_setup; then
     printf 'pushd ~/penpot/frontend >/dev/null && ./scripts/setup; popd >/dev/null\n'
   fi

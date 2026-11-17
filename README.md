@@ -2,14 +2,15 @@
 
 Penpot's `manage.sh run-devenv` starts four windows at once: the frontend watcher, Storybook, the exporter, and the backend, plus the MCP and Serena windows in agentic mode. On a laptop, four windows mean more heap and more compiling than the work needs. pdv starts the windows you name, caps the heap of the three JVMs those windows start, and keeps the compile caches between restarts.
 
-pdv owns the instance bring-up and the window set, plus two hygiene verbs that `run` also applies on its own: `acl` and `tune`. Any other `manage.sh` verb runs unchanged, so `pdv pull-devenv` is `manage.sh pull-devenv` and an upstream flag works here on the day it lands. pdv depends on nothing but the checkout's `manage.sh` and the files the Penpot devenv image ships.
+pdv owns the instance bring-up and the window set, the per-worktree database and its seeding, plus two hygiene verbs that `run` also applies on its own: `acl` and `tune`. Any other `manage.sh` verb runs unchanged, so `pdv pull-devenv` is `manage.sh pull-devenv` and an upstream flag works here on the day it lands. pdv depends on nothing but the checkout's `manage.sh`, the files the Penpot devenv image ships, and `curl` on the host.
 
 ## Requirements
 
 - Docker, rootless or rootful, with the Penpot devenv image (`./manage.sh pull-devenv`).
 - A Penpot checkout that carries `manage.sh`.
-- bash 4 or newer on the host.
+- bash 4 or newer, coreutils, and `curl` on the host.
 - `setfacl` (the `acl` package) on a rootless Docker host.
+- A checkout of the fixture repository (`~/Code/penpot-fixtures`, or `PDV_FIXTURES`) for named seed profiles. Without it, a database gets pdv's built-in default users and no fixtures.
 
 ## Install
 
@@ -18,6 +19,8 @@ Copy or clone this repository to `~/Code/pdv`, then link the command onto your P
 ```sh
 ln -s ~/Code/pdv/pdv ~/.local/bin/pdv
 ```
+
+An agent setting pdv up for someone else follows [docs/setup-for-agents.md](docs/setup-for-agents.md).
 
 pdv finds the checkout in this order: `--repo PATH`, `PENPOT_REPO`, the git worktree you run it from, then `~/Code/penpot`. Name one explicitly when the checkout you want is not the worktree you call pdv from:
 
@@ -53,6 +56,21 @@ Each service is one tmux window. `--services` takes a positive list, and the win
 
 `storybook` also puts the `storybook` compile target back into the frontend watcher, so pdv refuses a selection that names `storybook` without `frontend`. `--watchers` is the `frontend,storybook,exporter` shorthand.
 
+## A database and a bucket per worktree
+
+Every instance used to share the `penpot` database and object store, so two worktrees on branches with different migrations ran against one schema. pdv now names a database and a bucket after the worktree it binds, creates them before the backend starts, and seeds them from a profile in the fixture repository.
+
+```sh
+pdv run --seed branching        # pdvwt_<slug>, seeded from profiles/branching.yaml
+pdv run --db penpot             # the shared legacy database, never seeded
+pdv seed status                 # what the database holds
+pdv bundle save bundles/branching/review-pair.penpot --project review-pair
+```
+
+`pdvwt_<slug>` and `pdvwt-<slug>` follow the worktree directory, so `penpot-iop-vc-preview` becomes the database `pdvwt_penpot_iop_vc_preview` and the bucket `pdvwt-penpot-iop-vc-preview`. An unchanged profile imports nothing, and a changed one rebuilds the database before the backend starts. `pdv seed` rebuilds now. Without a profile the database still gets the built-in one: `developer@example.com` and `agent@example.com` in a `Developers` team, with nothing imported.
+
+The choice is remembered per worktree in its git directory, and `.pdv-agent.json` holds the agent account's URL, email, and token after a seed. The naming rules, the profile schema, the lifecycle, the orphan sweep, and `--db penpot` are in [the manual](docs/manual-pdv.md#each-worktree-gets-its-own-database-and-bucket).
+
 ## Three flags carry the policy
 
 **The heap cap.** `run` and every service window start carry `-Xmx768m -Xms50m` in `_JAVA_OPTIONS`, with `JAVA_OPTS` set to the same value where a script reads it. The frontend, exporter, and backend JVMs read the cap. `_JAVA_OPTIONS` is the channel that survives, because the image's `bashrc` and the backend's `scripts/_env` both re-export `JAVA_OPTS` without `-Xmx` ([why the channel matters](docs/manual-pdv.md#the-heap-cap-travels-in-_java_options-because-two-scripts-reset-java_opts)).
@@ -84,6 +102,8 @@ When the container exits during a start, pdv reads the log and prints the diagno
 ```sh
 pdv status                      # every instance, with its state and window set
 pdv status --ws 2               # one instance; a crashed one prints its state and a log tail
+pdv seed                        # rebuild this instance's database from its profile
+pdv seed status --ws 2          # the profile, hash, seeded-at, schema head, and files
 pdv stop --watchers             # stop the three watcher windows, keep the instance
 pdv start --watchers            # start them again in the same windows
 pdv stop                        # stop the instance, through manage.sh stop-devenv; also removes a container already stopped
@@ -110,12 +130,14 @@ pdv tune                        # post-start fixes (config.js, clojure-lsp, skil
 | the UI shows old code after a restart                                                 | wait for the first compile, or `pdv run --clean` when the cache is stale                               |
 | a fresh worktree fails with `EACCES` in the watch panes                               | `pdv acl` grants the container user write access to the tree                                           |
 | a watcher pane is idle after a restart                                                | `pdv start --watchers`, which installs missing node dependencies first                                 |
+| a worktree's database has no fixtures, or the backend sits on another database        | `pdv seed --ws N` rebuilds the database and restarts the backend on it                                 |
+| `.pdv-agent.json` is missing after a run                                              | `pdv seed --ws N`, and check that the profile marks an agent user                                      |
 
 ## The manual and the harness carry the detail
 
 `pdv help` lists the commands and flags it owns. [The manual](docs/manual-pdv.md) explains the service model, the heap channel, the cache policy, the recreate path, the hygiene verbs, and the parity harness. Much of what pdv does works around gaps in Penpot's devenv: [CONTRIBUTING.md](CONTRIBUTING.md) lists each workaround with the change that would move it into Penpot, and the checks a contribution passes.
 
-The parity harness checks the contract in two modes. The offline mode reads the window plan, the service rules, the cache policy, and the heap cap out of the checkout and compares them with pdv's. The live mode brings the same workspace up with `pdv run` and with `./manage.sh run-devenv`, compares the two instances, and tears both down.
+The parity harness checks the contract in two modes. The offline mode reads the window plan, the service rules, the cache policy, the heap cap, and the seed naming rules out of the checkout and compares them with pdv's. The live mode brings the same workspace up with `pdv run` and with `./manage.sh run-devenv`, compares the two instances, and tears both down.
 
 ```sh
 ./test/parity.sh                       # offline: plan, services, caps, caches

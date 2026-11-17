@@ -3,7 +3,8 @@
 # manage.sh run-devenv, asserted mechanically.
 #
 # Offline (default): pdv's window plan against the plan start-tmux.sh creates,
-# plus the service, cache, heap and selector rules. No container is touched.
+# plus the service, cache, heap, selector and seed-naming rules. No container
+# is touched.
 #
 # Live (--live): for each workspace, bring the instance up with pdv run and
 # again with ./manage.sh run-devenv, then compare the container state, the
@@ -263,6 +264,40 @@ check_instance_validation() {
   fi
 }
 
+# The database and bucket naming rules are pure functions in lib/pdv-seed.sh,
+# so they are checked by sourcing the library, with no container and no
+# database: the worktree slug, the database built from it, the bucket built
+# from the database, and the validation that keeps both legal.
+check_seed_names() {
+  local lib="$SELF/../lib/pdv-seed.sh" got want
+  got=$( . "$lib"
+         seed_slug 'penpot-iop-vc-preview'; printf '\t'
+         seed_slug 'Some.Weird  Name__--X'; printf '\t'
+         seed_slug 'aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeee'; printf '\t'
+         seed_db_for_tree '/home/me/Worktrees/penpot-iop-vc-preview'; printf '\t'
+         seed_bucket_for "$(seed_db_for_tree '/home/me/Worktrees/penpot-iop-vc-preview')"; printf '\t'
+         seed_bucket_for 'penpot'; printf '\t'
+         seed_bucket_for 'my_own_db' )
+  want=$(printf 'penpot_iop_vc_preview\tsome_weird_name_x\taaaaaaaaaabbbbbbbbbbccccccccccdddddddddd\tpdvwt_penpot_iop_vc_preview\tpdvwt-penpot-iop-vc-preview\tpenpot\tmy-own-db')
+  if [ "$got" = "$want" ]; then
+    ok "seed names: the worktree slug, database and bucket follow the contract"
+  else
+    bad "seed names differ from the contract"
+    printf '     want: %s\n     got:  %s\n' "$want" "$got" | sed 's/\t/ | /g'
+  fi
+  got=$( . "$lib"
+         seed_db_valid 'pdvwt_penpot_iop_vc_preview' && printf 'valid\t' || printf 'refused\t'
+         seed_db_valid 'Bad-Name' && printf 'valid\t' || printf 'refused\t'
+         seed_db_valid "$(printf 'a%.0s' $(seq 1 64))" && printf 'valid\t' || printf 'refused\t'
+         seed_db_valid 'my-own-db' && printf 'valid' || printf 'refused' )
+  want=$(printf 'valid\trefused\trefused\tvalid')
+  if [ "$got" = "$want" ]; then
+    ok "seed names: a database name must be lower-case ASCII, start with a letter, and fit 63 characters"
+  else
+    bad "seed name validation is not the documented one (want '$want', got '$got')"
+  fi
+}
+
 # --------------------------------------------------------------- live checks
 CTR_FOR() { printf 'penpot-devenv-ws%s-main' "$1"; }
 
@@ -482,6 +517,7 @@ if [ "$MODE" = "offline" ]; then
   check_cache_policy
   check_heap_cap
   check_instance_validation
+  check_seed_names
 else
   IFS=',' read -ra WS_LIST <<<"$WSD"
   for n in "${WS_LIST[@]}"; do
