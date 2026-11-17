@@ -142,7 +142,7 @@ window_command() {
     exporter)
       printf 'cd ~/penpot/exporter && rm -f target/app.js* && %s./scripts/watch' "$prefix" ;;
     backend)
-      printf 'cd ~/penpot/backend && %s./scripts/start-dev' "$prefix" ;;
+      printf 'cd ~/penpot/backend && %s%s./scripts/start-dev' "$prefix" "$(backend_prefix)" ;;
     mcp)
       printf 'cd ~/penpot/mcp && ./scripts/setup && pnpm run build && ./scripts/start-mcp-devenv' ;;
     serena)
@@ -150,6 +150,16 @@ window_command() {
         "${SERENA_CONTEXT:-desktop-app}" ;;
     *) svc_usage "unknown service '$svc'" ;;
   esac
+}
+
+# The devenv runs no admin-console (Nitrate) service, and the backend turns
+# the module on by default, so every get-profile fails with "nitrate is
+# unreachable". scripts/_env appends its own flags after an incoming
+# PENPOT_FLAGS and never names the admin-console, and _env.local is sourced
+# later, so a developer's `enable-admin-console` there still wins. The `$` is
+# literal here: the container shell expands it.
+backend_prefix() {
+  printf '%s ' 'PENPOT_FLAGS="${PENPOT_FLAGS:-} disable-admin-console"'
 }
 
 # The exporter window carries a second pane that waits for the build.

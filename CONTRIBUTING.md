@@ -85,9 +85,15 @@ In Penpot: `manage.sh run-devenv` prints the same advisory.
 
 ### config.js comes from PENPOT_FLAGS
 
-pdv today: the agentic frontend enables MCP only through `frontend/resources/public/js/config.js`. The file is gitignored, and a frontend build deletes it along with the rest of `resources/public`. `pdv tune` keeps a snapshot of the file in the instance's home volume and restores it when it is gone, or writes it from `PDV_PENPOT_FLAGS`. `pdv run --agentic` does the same before the start, where `manage.sh` refuses to run.
+pdv today: the agentic frontend enables MCP only through `frontend/resources/public/js/config.js`. The file is gitignored, and a frontend build deletes it along with the rest of `resources/public`. `pdv tune` keeps a snapshot of the file in the instance's home volume and restores it when it is gone, or writes it from `PDV_PENPOT_FLAGS` plus `disable-admin-console` (see the next section). `pdv run --agentic` does the same before the start, where `manage.sh` refuses to run.
 
 In Penpot: the devenv generates the file from `PENPOT_FLAGS` at start, as `docker/images/files/nginx-entrypoint.sh` already does for the production images, and the agentic pre-flight in `manage.sh` goes away. pdv then drops the snapshot and its variable.
+
+### The admin-console is off in the devenv
+
+pdv today: the backend turns the admin-console (Nitrate) module on by default, and no devenv runs the service, so every profile read fails with "nitrate is unreachable". pdv starts the backend with `disable-admin-console` prepended to `PENPOT_FLAGS` (`lib/pdv-services.sh::backend_prefix`), and a `config.js` it generates carries the same flag for a frontend that predates penpot#13061.
+
+In Penpot: `backend/scripts/_env` applies the default penpot#13061 gave the frontend: with `PENPOT_DEVENV=true`, which `docker-compose.main.yml` already sets, it prepends `disable-admin-console` to the backend flags, and `enable-admin-console` in `_env.local` turns the module back on. pdv then drops the prefix. The `config.js` flag goes once no supported branch predates penpot#13061.
 
 ### The clojure-lsp setting is committed
 

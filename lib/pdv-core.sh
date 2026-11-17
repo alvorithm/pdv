@@ -362,17 +362,23 @@ CTR_STATE="/home/penpot/.local/state/pdv"
 CONFIG_JS="frontend/resources/public/js/config.js"
 
 # The flags a generated config.js carries.
+# $1: true for an agentic instance, whose frontend needs enable-mcp. The
+# admin-console flag is transitional: a frontend that carries penpot#13061
+# already turns it off in the devenv, so the flag is a no-op there.
 config_js_content() {
-  printf 'var penpotFlags = "%s";\n' "${PDV_PENPOT_FLAGS:-enable-mcp}"
+  local flags="${PDV_PENPOT_FLAGS-}"
+  if [ -z "$flags" ] && [ "${1:-false}" = true ]; then flags=enable-mcp; fi
+  printf 'var penpotFlags = "%s";\n' "${flags:+$flags }disable-admin-console"
 }
 
 # config.js is gitignored and lives under resources/public, which a frontend
-# build deletes whole, and the agentic frontend needs it to enable MCP. While
-# the file exists, the tune keeps a snapshot of it in the instance's home; once
-# a build has deleted it (or it is a symlink, which the container cannot
-# follow out of the bind mount), the tune restores the snapshot. Without a
-# snapshot it generates the file from PDV_PENPOT_FLAGS, but only for an
-# agentic instance or when that variable is set.
+# build deletes whole. The agentic frontend needs it to enable MCP, and a
+# frontend without penpot#13061 needs it to hide the admin-console. While the
+# file exists, the tune keeps a snapshot of it in the instance's home; once a
+# build has deleted it (or it is a symlink, which the container cannot follow
+# out of the bind mount), the tune restores the snapshot. Without a snapshot
+# it generates the file (config_js_content). A file the developer wrote is
+# never changed.
 tune_config_js() {
   local cfg="$DEST/$CONFIG_JS" snap="$CTR_STATE/config.js" state agentic=$AGENTIC
   state=$(docker exec "$CTR" sh -c '
@@ -398,14 +404,12 @@ tune_config_js() {
   if ! $agentic && tmx list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx mcp; then
     agentic=true
   fi
-  if ! $agentic && [ -z "${PDV_PENPOT_FLAGS:-}" ]; then
-    vsay "tune: no config.js and nothing asks for one (not agentic, PDV_PENPOT_FLAGS unset)"
-    return 0
-  fi
-  say "tune: writing config.js with flags '${PDV_PENPOT_FLAGS:-enable-mcp}'"
-  why "the agentic frontend enables MCP only through config.js, and a symlink into a directory outside the bind mount dangles inside the container"
-  config_js_content | ctr_write_file "$cfg" \
-    || warn "tune: could not write config.js; the frontend will not enable MCP"
+  local content
+  content=$(config_js_content "$agentic")
+  say "tune: writing config.js: $content"
+  why "a frontend build deletes it, the agentic frontend enables MCP only through it, and a frontend without penpot#13061 shows the admin-console"
+  printf '%s\n' "$content" | ctr_write_file "$cfg" \
+    || warn "tune: could not write config.js"
 }
 
 # Write stdin to a path inside the container, replacing whatever is there. As
