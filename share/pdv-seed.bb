@@ -445,6 +445,14 @@
             team-names (declared-teams teams)
             bundles (validate-bundles bad! (list-section bad! :bundles data) team-names)
             generators (validate-generators bad! (list-section bad! :generators data) team-names)]
+        ;; A nudge, never a refusal: names are how a person or an agent finds
+        ;; a fixture again in the project list.
+        (doseq [[kind items] [["bundles" bundles] ["generators" generators]]
+                [i {:keys [project]}] (map-indexed vector items)
+                :when (and (string? project)
+                           (not (re-find #"^\d{8} \S.*: \S" project)))]
+          (say "naming: %s[%d].project %s is not '<YYYYMMDD> <Area>: <what it shows>'; a dated, descriptive name tells the next reader what the files are for"
+               kind i (pr-str project)))
         (if (seq @errs)
           (do (say "profile.yaml is not usable:")
               (doseq [m @errs] (say "  %s" m))

@@ -171,13 +171,16 @@ The name is remembered per worktree. `PDV_SEED_DEFAULT=branching pdv run` seeds 
 
 Failure: a profile name that does not exist stops the run before any window starts, with `seed: profile '<name>' is not in <PDV_FIXTURES>/profiles`. Fix the name or the clone path, never the database. `seed: the instance is up but not seeded` means the backend did not answer in time, and `pdv seed` retries the whole post-start half. A seed needs a backend window, so `pdv run --services frontend` reports `seed: no backend window selected, so nothing was seeded`. `seed status: the shared postgres is not running` means no instance is up, and `seed status: <db> does not exist yet` means this worktree's database has not been created.
 
+Name what you create so the next reader can find it without asking you. A project you make while working is `<YYYYMMDD> <Area>: <what it shows>`, for example `20261117 Tokens: a set applied to a component's copies`. Rename every file in it to say what it demonstrates before you export, never "Untitled" or "copy 2". The fixture repository's README carries the full scheme.
+
 Export before the worktree goes away:
 
 ```sh
-pdv bundle save bundles/branching/review-pair.penpot --project review-pair
+pdv bundle save bundles/tokens/20261117-set-applied-to-copies.penpot \
+  --project "20261117 Tokens: a set applied to a component's copies"
 ```
 
-Success: the project is written under the fixture repository, and the command prints the `git add` and `git commit` lines. It never commits.
+Success: the project is written under the fixture repository, and the command prints the `git add` and `git commit` lines. It never commits. A path without a date prints a naming warning, and so does a profile project outside the pattern when the driver stages it. Fix the name rather than ignore the line.
 
 What is not exported disappears. The database and the bucket live as long as the worktree path exists, and pdv sweeps the `pdvwt_*` databases whose recorded path is gone at the next `pdv run` and before `pdv stop --all`. `pdv stop` keeps them. `--db penpot` is the escape to the legacy shared database, which pdv never creates, seeds, drops, or sweeps.
 

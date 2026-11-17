@@ -51,7 +51,9 @@ pdv run --seed none                   # forget the name: the default profile app
 PDV_SEED_DEFAULT=branching pdv run    # the profile for every worktree that chose none
 ```
 
-Without a named profile the database still gets pdv's built-in one, `share/default-profile.yaml`: `odysseus@penpot.app` owns the `Ithaca` team, `hermes@penpot.app` is an editor whose token pdv mints, and nothing is imported. That file is also the shortest working example of the profile schema. Every shipped profile writes the passwords inline, because a devenv database is disposable and `123123` reaches any seeded account in a demo. `password_file` stays in the schema for whoever wants a password out of the repository.
+Without a named profile the database still gets pdv's built-in one, `share/default-profile.yaml`: `odysseus@penpot.app` owns the team "Work on this worktree", `hermes@penpot.app` is an editor whose token pdv mints, and nothing is imported. That file is also the shortest working example of the profile schema. Every shipped profile writes the passwords inline, because a devenv database is disposable and `123123` reaches any seeded account in a demo. `password_file` stays in the schema for whoever wants a password out of the repository.
+
+Names carry intent and a date, because they are how the next person or agent finds a fixture: a project is `<YYYYMMDD> <Area>: <what it shows>`, a bundle is `bundles/<area>/<YYYYMMDD>-<what-it-shows>.penpot`, and a team names the profile's purpose. The driver prints a `naming:` line for a project outside that pattern, and `pdv bundle save` warns about a path without the date. Neither refuses anything. The fixture repository's README carries the full scheme with examples.
 
 Log in to a seeded instance as `odysseus@penpot.app` with `123123`, and let an agent read `.pdv-agent.json` for `hermes@penpot.app` and its token. No address at `penpot.app` receives mail from a devenv, because the devenv's SMTP goes to the mailpit container.
 

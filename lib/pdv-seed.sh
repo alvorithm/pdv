@@ -832,6 +832,11 @@ cmd_bundle() {
   done
   [ -n "$relpath" ] || svc_usage "bundle save: needs a path under the fixture repository"
   [ -n "$project" ] || svc_usage "bundle save: needs --project NAME"
+  # A nudge, never a refusal: the path is how the next reader finds it.
+  case "$(basename "$relpath")" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-?*.penpot) ;;
+    *) warn "bundle save: name the file bundles/<area>/<YYYYMMDD>-<what-it-shows>.penpot, for example bundles/branching/20261028-branch-id-reroute.penpot" ;;
+  esac
   manage_load
   seed_resolve_selection
   container_running "$CTR" || die "bundle save: $CTR is not running — bring it up with: pdv run --ws $WS_INDEX"
