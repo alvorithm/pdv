@@ -835,6 +835,13 @@ cmd_bundle() {
   manage_load
   seed_resolve_selection
   container_running "$CTR" || die "bundle save: $CTR is not running — bring it up with: pdv run --ws $WS_INDEX"
+  # The export reads whatever database the live backend uses; a warm instance
+  # on another database would write the wrong files into the fixtures.
+  local live
+  live=$(seed_live_backend_db)
+  [ -n "$live" ] || die "bundle save: no backend JVM runs in $CTR — start it with: pdv start --services backend --ws $WS_INDEX"
+  [ "$live" = "$PDV_DB" ] \
+    || die "bundle save: the backend of $CTR is on $live, not $PDV_DB; run pdv run --ws $WS_INDEX (add --db $live to export from that database)"
   if [ -z "$team" ]; then
     team=$(seed_profile_team) || true
     if [ -z "$team" ]; then

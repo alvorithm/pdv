@@ -47,7 +47,7 @@ The driver `share/pdv-seed.bb` runs in the container and stages what the profile
 
 ```sh
 pdv run --seed branching              # profiles/branching.yaml seeds this worktree
-pdv run --seed none                   # forget the name, keep the built-in default users
+pdv run --seed none                   # forget the name: the default profile applies
 PDV_SEED_DEFAULT=branching pdv run    # the profile for every worktree that chose none
 ```
 
