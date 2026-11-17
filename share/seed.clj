@@ -368,10 +368,14 @@
   zstd stream, v3 is a zip. Both return `{:file-ids [...]}`."
   [system {:keys [profile-id team-id project-id]} input source]
   (let [format (bfc/parse-file-format input)
+        ;; The import RPC's own lookup: app.binfile.common/get-team exists on
+        ;; develop but not on staging, and a seed must load on both.
         cfg (bfc/import-cfg system
                             {:profile-id profile-id
                              :project-id project-id
-                             :team (bfc/get-team system team-id)
+                             :team (teams/get-team system
+                                                   :profile-id profile-id
+                                                   :team-id team-id)
                              :name nil
                              :input input})]
     (case format
