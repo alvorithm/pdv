@@ -42,6 +42,7 @@ A profile is one YAML file in the fixture repository, `$PDV_FIXTURES/profiles/<n
 - `teams`: every team with its members and each member's role (`owner`, `admin`, `editor`, or `viewer`).
 - `bundles`: the files to import, each one either a path in the fixture repository or a source such as `git+https://github.com/<owner>/<repo>@<rev>#<path>`, with an optional team and project.
 - `generators`: programs in the repository that create files, with their arguments and target project.
+- `backend_heap`: an optional `-Xmx` size such as `"2g"` for the backend JVM, for profiles that import hub files (see "The heap cap travels in `_JAVA_OPTIONS`").
 
 The driver `share/pdv-seed.bb` runs in the container and stages what the profile names. The engine `share/seed.clj` is loaded into the running backend, where it creates the users, teams, and files with Penpot's own commands, imports each bundle, and records every import with its hash. A project a seed creates is named `<project> · schema <migration number>`, for example `branch-id-reroute · schema 0808`, so a fixture states which schema it was made against. The database's `migrations` table holds the full name of that step.
 
@@ -113,6 +114,8 @@ The second variable is best effort. The image's `bashrc` exports `JAVA_OPTS` wit
 The cap reaches the window commands pdv sends, and not a release build or the test JVM. Release builds start with the JVM default heap. The test JVM starts with its own `-Xmx2g`.
 
 `--java-opts` replaces the value, `DEVENV_JAVA_OPTS` sets the same value from the environment, and an explicitly empty value (`--java-opts ""`) removes the cap.
+
+A seed profile can raise the backend's heap alone with `backend_heap: "2g"`, because hub files import into the backend JVM and 768 MiB is too little for some of them. The backend window then starts with `-Xmx2g -Xms50m`, and the other windows keep the default. `--java-opts` and `DEVENV_JAVA_OPTS` still win over the profile. pdv reads the value when it stages the profile and remembers it in the worktree's git directory as `pdv-heap`, so `pdv start --services backend` gives the backend the same heap. A backend that was already running keeps its heap, and `pdv run` prints the restart command when that heap differs. `pdv seed` restarts the backend, so it applies the new heap itself.
 
 ## The admin-console is off, because no devenv runs one
 

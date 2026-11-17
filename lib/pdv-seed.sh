@@ -46,6 +46,9 @@ SEED_TREE=""
 SEED_PROFILE=""
 SEED_PROFILE_FILE=""
 SEED_INPUT_HASH=""
+# The profile's backend_heap (an -Xmx size), remembered in the worktree's git
+# dir as pdv-heap so that `pdv start` gives the backend the same heap.
+SEED_BACKEND_HEAP=""
 SEED_CACHE_PATH=""
 # The command line's own choices, applied over the persisted ones.
 SEED_ARG=""; SEED_ARG_SET=false
@@ -196,6 +199,7 @@ seed_resolve_selection() {
   if [ -z "$profile" ] && [ -n "${PDV_SEED_DEFAULT:-}" ]; then profile=$PDV_SEED_DEFAULT; fi
   SEED_PROFILE=$profile
   SEED_PROFILE_FILE=""
+  SEED_BACKEND_HEAP=""
   SEED_ENABLED=true
   if [ "$PDV_DB" = "penpot" ]; then
     # The legacy shared database: never created, seeded, dropped or emptied.
@@ -204,6 +208,7 @@ seed_resolve_selection() {
     SEED_PROFILE_FILE=$(seed_profile_file "$profile" 2>/dev/null || true)
     return 0
   fi
+  SEED_BACKEND_HEAP=$(seed_state_read "$SEED_TREE" pdv-heap)
   if SEED_PROFILE_FILE=$(seed_profile_file "$profile"); then
     [ -f "$SEED_PROFILE_FILE" ] \
       || warn "seed: $SEED_PROFILE_FILE is missing; the profile cannot be staged"
@@ -501,6 +506,7 @@ seed_stage_all() {
   local out kind a b c
   seed_stage_reset || return 1
   seed_stage_profile || return 1
+  local heap=""
   out=$(seed_driver needs) \
     || { warn "seed: the driver refused the profile '${SEED_PROFILE:-default}' (see its message above)"; return 1; }
   while IFS=$'\t' read -r kind a b c; do
@@ -509,9 +515,17 @@ seed_stage_all() {
       repo)   seed_stage_repo "$a" || return 1 ;;
       remote) seed_stage_remote "$a" "$b" "$c" || return 1 ;;
       secret) seed_stage_secret "$a" "$b" || return 1 ;;
+      heap)   heap=$a ;;
       *)      warn "seed: the driver asked for an unknown staging entry '$kind'"; return 1 ;;
     esac
   done <<<"$out"
+  SEED_BACKEND_HEAP=$heap
+  if [ -n "$heap" ]; then
+    seed_state_write "$SEED_TREE" pdv-heap "$heap" || true
+    vsay "seed: the profile gives the backend -Xmx$heap"
+  else
+    seed_state_clear "$SEED_TREE" pdv-heap
+  fi
   docker exec "$CTR" sudo chown -R penpot:users "$SEED_STAGE" \
     || { warn "seed: could not hand $SEED_STAGE to the container user"; return 1; }
   SEED_INPUT_HASH=$(seed_driver hash) || { warn "seed: the driver could not hash the staged input"; return 1; }
@@ -694,6 +708,20 @@ seed_live_backend_db() {
       tr "\0" "\n" <"/proc/$p/environ" 2>/dev/null \
         | sed -n "s|^PENPOT_DATABASE_URI=postgresql://[^/]*/||p"
     done' 2>/dev/null | head -1 || true
+}
+
+# A backend that was already running keeps the heap it started with. Warn when
+# that differs from the cap this worktree's backend should have now.
+seed_check_backend_heap() {
+  local want live
+  want=$(backend_cap)
+  live=$(docker exec "$CTR" sh -c '
+    for p in $(pgrep -f "app[.]main" 2>/dev/null); do
+      tr "\0" "\n" <"/proc/$p/environ" 2>/dev/null | sed -n "s|^_JAVA_OPTIONS=||p"
+    done' 2>/dev/null | head -1 || true)
+  [ -n "$live" ] && [ "$live" != "$want" ] || return 0
+  warn "seed: the backend of $CTR runs with '$live', not '$want'"
+  imp "restart it: pdv stop --services backend --ws $WS_INDEX && pdv start --services backend --ws $WS_INDEX"
 }
 
 # True when the running instance's backend is on this worktree's database, so

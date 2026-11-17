@@ -42,7 +42,7 @@
 (def ^:private default-password "123123")
 
 (def ^:private roles #{"owner" "admin" "editor" "viewer"})
-(def ^:private top-keys #{:description :users :teams :bundles :generators})
+(def ^:private top-keys #{:description :backend_heap :users :teams :bundles :generators})
 (def ^:private user-keys #{:email :fullname :password :password_file :agent})
 (def ^:private team-keys #{:name :members})
 (def ^:private member-keys #{:email :role})
@@ -439,6 +439,10 @@
       (when (some? (:description data))
         (when-not (string? (:description data))
           (bad! "description must be a string")))
+      (when (some? (:backend_heap data))
+        (when-not (and (string? (:backend_heap data))
+                       (re-find #"^[1-9][0-9]*[mMgG]$" (:backend_heap data)))
+          (bad! "backend_heap must be a quoted -Xmx size such as \"2g\" or \"1536m\"")))
       (let [users (validate-users bad! (list-section bad! :users data))
             _ (when (empty? users) (bad! "users must list at least one user"))
             teams (validate-teams bad! (list-section bad! :teams data) (user-emails users))
@@ -459,6 +463,7 @@
               (System/exit 1))
           {:text text
            :description (:description data)
+           :backend-heap (:backend_heap data)
            :users users
            :teams teams
            :bundles bundles
@@ -621,6 +626,8 @@
     (doseq [[i u] (map-indexed vector (:users profile))]
       (when-let [password-file (:password-file u)]
         (println (str "secret\t" i "\t" password-file))))
+    (when-let [heap (:backend-heap profile)]
+      (println (str "heap\t" heap)))
     (write-remote-index! resolved)
     (flush)))
 

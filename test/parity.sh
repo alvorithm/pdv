@@ -242,6 +242,21 @@ check_heap_cap() {
   else
     bad "--java-opts did not reach every JVM window: $backend"
   fi
+  # A profile's backend_heap reaches the backend alone, and an explicit cap wins.
+  local lib="source '$SELF/../lib/pdv-core.sh'; source '$SELF/../lib/pdv-services.sh'; resolve_cap"
+  local got
+  got=$(env -u DEVENV_JAVA_OPTS bash -c "$lib; SEED_BACKEND_HEAP=2g; backend_cap; printf '|'; cap_prefix" 2>/dev/null)
+  if [ "${got%%|*}" = "-Xmx2g -Xms50m" ] && printf '%s' "${got#*|}" | grep -qF -- '-Xmx768m'; then
+    ok "a profile's backend_heap raises the backend's cap and leaves the other windows alone"
+  else
+    bad "backend_heap did not give the backend -Xmx2g alone: $got"
+  fi
+  got=$(DEVENV_JAVA_OPTS="-Xmx1g" bash -c "$lib; SEED_BACKEND_HEAP=2g; backend_cap" 2>/dev/null)
+  if [ "$got" = "-Xmx1g" ]; then
+    ok "DEVENV_JAVA_OPTS wins over a profile's backend_heap"
+  else
+    bad "DEVENV_JAVA_OPTS lost to backend_heap: $got"
+  fi
 }
 
 check_instance_validation() {

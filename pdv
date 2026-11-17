@@ -250,21 +250,25 @@ cmd_run() {
     seed_sweep_orphans || warn "sweep: orphaned per-worktree databases were not checked"
     seed_export_tmux_env
     tune_if_available
-    start_selected
-    local rebuilt=false
+    # Stage before any window starts, so a backend window started here gets
+    # the profile's heap.
+    local rebuilt=false staged=false
     if $SEED_ENABLED; then
       if seed_stage_all; then
-        if seed_db_stale; then
-          if seed_rebuild; then
-            rebuilt=true
-          else
-            warn "seed: $PDV_DB could not be rebuilt; the instance is unchanged"
-          fi
-        fi
+        staged=true
       else
         warn "seed: staging the profile failed; retry with: pdv seed --ws $WS_INDEX"
       fi
     fi
+    start_selected
+    if $staged && seed_db_stale; then
+      if seed_rebuild; then
+        rebuilt=true
+      else
+        warn "seed: $PDV_DB could not be rebuilt; the instance is unchanged"
+      fi
+    fi
+    $rebuilt || seed_check_backend_heap
     if $rebuilt || seed_backend_on_pdv_db; then seed_after_start || true; fi
     finish_hints
     if $attach; then attach_now; fi

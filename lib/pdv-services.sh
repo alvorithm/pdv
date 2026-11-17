@@ -49,6 +49,26 @@ cap_prefix() {
   printf "_JAVA_OPTIONS=%s JAVA_OPTS=%s " "$(shquote "$CAP")" "$(shquote "$CAP")"
 }
 
+# The backend's cap: an explicit --java-opts or DEVENV_JAVA_OPTS wins, then a
+# profile's backend_heap (SEED_BACKEND_HEAP, from lib/pdv-seed.sh), then the
+# default. Only the backend imports fixtures, so only its window takes the
+# profile's heap.
+backend_cap() {
+  if [ "${PDV_JAVA_OPTS_GIVEN:-false}" != "true" ] && [ -z "${DEVENV_JAVA_OPTS+set}" ] \
+     && [ -n "${SEED_BACKEND_HEAP:-}" ]; then
+    printf '%s' "-Xmx${SEED_BACKEND_HEAP} -Xms50m"
+  else
+    printf '%s' "$CAP"
+  fi
+}
+
+backend_cap_prefix() {
+  local cap
+  cap=$(backend_cap)
+  [ -n "$cap" ] || return 0
+  printf "_JAVA_OPTIONS=%s JAVA_OPTS=%s " "$(shquote "$cap")" "$(shquote "$cap")"
+}
+
 # --------------------------------------------------------------- selection
 # Parses a comma list against PDV_SERVICES. Sets SELECTED (array, canonical
 # order) and stops on an unknown name.
@@ -142,7 +162,7 @@ window_command() {
     exporter)
       printf 'cd ~/penpot/exporter && rm -f target/app.js* && %s./scripts/watch' "$prefix" ;;
     backend)
-      printf 'cd ~/penpot/backend && %s%s./scripts/start-dev' "$prefix" "$(backend_prefix)" ;;
+      printf 'cd ~/penpot/backend && %s%s./scripts/start-dev' "$(backend_cap_prefix)" "$(backend_prefix)" ;;
     mcp)
       printf 'cd ~/penpot/mcp && ./scripts/setup && pnpm run build && ./scripts/start-mcp-devenv' ;;
     serena)
