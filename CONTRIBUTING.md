@@ -53,6 +53,12 @@ pdv today: `manage.sh stop-devenv` brings down only the instances that `list-run
 
 In Penpot: `stop-devenv` selects its targets from `docker ps -a`, so `--all` and `--ws N` bring down every instance whose main container exists, running or not. pdv then drops the pre-step.
 
+### Each worktree gets its own database and bucket
+
+pdv plans (not built yet, see `dv:extras:pdv-seeds-an-empty-workspace-from-a-file-repository`): every instance shares the `penpot` database and the `penpot` bucket, because `docker/devenv/defaults.env` sets one `PENPOT_DATABASE_URI` and one bucket for all of them, and `manage.sh::instance-env-overrides` overrides only the test database per instance. Two worktrees on branches with different migrations then run against one schema. pdv derives a name from the bound worktree's directory, not from the ws number, and before the start it creates the database the way `manage.sh::ensure-instance-test-database` creates the test database. It then passes `PENPOT_DATABASE_URI` and `PENPOT_OBJECTS_STORAGE_S3_BUCKET` as a prefix of the backend window command, the channel the heap cap already uses (`lib/pdv-services.sh::window_command`), and sets both in the tmux session environment so that later panes inherit them. `backend/scripts/_env::setup_s3_bucket` creates the bucket at start. pdv writes no file into the worktree, so the feature needs no overlay and leaves a developer's own `backend/scripts/_env.local` in charge: a value that file exports wins. A shell opened with `docker exec` still sees the shared defaults, so pdv's own verbs that reach the database pass the name explicitly.
+
+In Penpot: `manage.sh run-devenv` takes an opt-in `--database NAME`. `instance-env-overrides` then sets `PENPOT_DATABASE_URI` and `PENPOT_OBJECTS_STORAGE_S3_BUCKET` for that instance, which reaches the whole container through compose, and a generalized `ensure-instance-database` creates the database as the test database is created today. `scripts/psql` learns the instance's database as it already knows the instance's test database. The shared database stays the default, as the comment in `docker-compose.main.yml` intends. pdv then passes the flag and drops the prefix and the tmux environment.
+
 ### safe.directory is added once
 
 pdv today: `manage.sh` appends a `safe.directory` entry to the global git configuration on every run, so pdv hands it a disposable copy through `GIT_CONFIG_GLOBAL`.
