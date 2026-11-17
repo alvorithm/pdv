@@ -43,7 +43,7 @@ A profile is one YAML file in the fixture repository, `$PDV_FIXTURES/profiles/<n
 - `bundles`: the files to import, each one either a path in the fixture repository or a source such as `git+https://github.com/<owner>/<repo>@<rev>#<path>`, with an optional team and project.
 - `generators`: programs in the repository that create files, with their arguments and target project.
 
-The driver `share/pdv-seed.bb` runs in the container and stages what the profile names. The engine `share/seed.clj` is loaded into the running backend, where it creates the users, teams, and files with Penpot's own commands, imports each bundle, and records every import with its hash. A project a seed creates is named `<project> · schema <last applied migration>`, so a fixture states which schema it was made against.
+The driver `share/pdv-seed.bb` runs in the container and stages what the profile names. The engine `share/seed.clj` is loaded into the running backend, where it creates the users, teams, and files with Penpot's own commands, imports each bundle, and records every import with its hash. A project a seed creates is named `<project> · schema <migration number>`, for example `branch-id-reroute · schema 0808`, so a fixture states which schema it was made against. The database's `migrations` table holds the full name of that step.
 
 ```sh
 pdv run --seed branching              # profiles/branching.yaml seeds this worktree
@@ -51,7 +51,9 @@ pdv run --seed none                   # forget the name: the default profile app
 PDV_SEED_DEFAULT=branching pdv run    # the profile for every worktree that chose none
 ```
 
-Without a named profile the database still gets pdv's built-in one, `share/default-profile.yaml`: `developer@example.com` owns a `Developers` team, `agent@example.com` is an editor whose token pdv mints, and nothing is imported. That file is also the shortest working example of the profile schema.
+Without a named profile the database still gets pdv's built-in one, `share/default-profile.yaml`: `odysseus@penpot.app` owns the `Ithaca` team, `hermes@penpot.app` is an editor whose token pdv mints, and nothing is imported. That file is also the shortest working example of the profile schema. Every shipped profile writes the passwords inline, because a devenv database is disposable and `123123` reaches any seeded account in a demo. `password_file` stays in the schema for whoever wants a password out of the repository.
+
+Log in to a seeded instance as `odysseus@penpot.app` with `123123`, and let an agent read `.pdv-agent.json` for `hermes@penpot.app` and its token. No address at `penpot.app` receives mail from a devenv, because the devenv's SMTP goes to the mailpit container.
 
 A developer who wants their own default for every worktree writes it once in `${XDG_CONFIG_HOME:-~/.config}/pdv/env`, one `PDV_NAME=value` per line, for example `PDV_SEED_DEFAULT=default` and `PDV_FIXTURES=~/Code/penpot-fixtures`. pdv reads only `PDV_*` names there, expands a leading `~/`, and lets the environment override the file.
 
@@ -84,7 +86,7 @@ After a seed that has an agent user, pdv copies the credentials out to `<tree>/.
 
 ### `--db penpot` is the escape to the shared database
 
-The shared database is still there, and `pdv run --db penpot` uses it with the `penpot` bucket. pdv never creates, seeds, drops or sweeps it, so an instance on it behaves exactly as every instance did before this change: a user, a project, or a migration created in one instance is visible from every instance that shares it. Reach for it when data must cross instance boundaries, and for anything else prefer the worktree's own database.
+The shared database is the one the devenv's Postgres creates on its first start, and `pdv run --db penpot` uses it with the `penpot` bucket. pdv never creates, seeds, drops or sweeps it, so an instance on it behaves exactly as every instance did before this change: a user, a project, or a migration created in one instance is visible from every instance that shares it. Reach for it when data must cross instance boundaries, and for anything else prefer the worktree's own database. Once nobody needs it, `DROP DATABASE penpot` frees it, and from then on `--db penpot` fails, because nothing recreates it.
 
 The migration hazard lives there. Every backend migrates that one schema at boot, migration steps are keyed by module and step name, so an older branch starts normally against a schema that a newer branch migrated. The risk is a later upstream migration that reuses a number with different SQL, because the step is skipped when the name already has a row. Watch for it when a rebase brings new migration files.
 

@@ -67,7 +67,7 @@ pdv seed status                 # what the database holds
 pdv bundle save bundles/branching/review-pair.penpot --project review-pair
 ```
 
-`pdvwt_<slug>` and `pdvwt-<slug>` follow the worktree directory, so `penpot-iop-vc-preview` becomes the database `pdvwt_penpot_iop_vc_preview` and the bucket `pdvwt-penpot-iop-vc-preview`. An unchanged profile imports nothing, and a changed one rebuilds the database before the backend starts. `pdv seed` rebuilds now. Without a profile the database still gets the built-in one: `developer@example.com` and `agent@example.com` in a `Developers` team, with nothing imported.
+`pdvwt_<slug>` and `pdvwt-<slug>` follow the worktree directory, so `penpot-iop-vc-preview` becomes the database `pdvwt_penpot_iop_vc_preview` and the bucket `pdvwt-penpot-iop-vc-preview`. An unchanged profile imports nothing, and a changed one rebuilds the database before the backend starts. `pdv seed` rebuilds now. Without a profile the database still gets the built-in one: `odysseus@penpot.app` owns an `Ithaca` team, `hermes@penpot.app` is the agent, and nothing is imported. Every seeded password is `123123`.
 
 The choice is remembered per worktree in its git directory, and `.pdv-agent.json` holds the agent account's URL, email, and token after a seed. The naming rules, the profile schema, the lifecycle, the orphan sweep, and `--db penpot` are in [the manual](docs/manual-pdv.md#each-worktree-gets-its-own-database-and-bucket).
 

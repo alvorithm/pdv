@@ -266,8 +266,14 @@
 
 ;; --- projects
 ;;
-;; A seeded project carries the schema head in its name, so a database
-;; reseeded after a migration gets a fresh project instead of a stale one.
+;; A seeded project carries the schema head's number in its name (0159 for
+;; 0159-add-file-data-storage-object-id; the migrations table holds the
+;; rest), so a database reseeded after a migration gets a fresh project
+;; instead of a stale one.
+
+(defn- seeded-project-name
+  [label head]
+  (str label " · schema " (or (re-find #"^\d+" (str head)) head)))
 
 (defn- ensure-project!
   [{:keys [::db/conn] :as system} team-id profile-id name]
@@ -299,7 +305,7 @@
    system
    (fn [system]
      (let [team (resolve-team! system ctx team-name)
-           name (str label " · schema " (:schema-head ctx))
+           name (seeded-project-name label (:schema-head ctx))
            project (ensure-project! system (:id team) (:profile-id team) name)]
        {:team-id (:id team)
         :profile-id (:profile-id team)
@@ -602,7 +608,7 @@
             (throw (ex-info "no project name given"
                             {:type :pdv-seed/invalid-request})))
         team-name (some-> team-name str str/trim not-empty)
-        versioned (str project-name " · schema " head)
+        versioned (seeded-project-name project-name head)
         rows (if (nil? team-name)
                (q conn sql-project-any-team versioned project-name)
                (q conn sql-project-by-team team-name versioned project-name))]
