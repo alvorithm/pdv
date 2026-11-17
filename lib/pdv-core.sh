@@ -364,11 +364,13 @@ CONFIG_JS="frontend/resources/public/js/config.js"
 # The flags a generated config.js carries.
 # $1: true for an agentic instance, whose frontend needs enable-mcp. The
 # admin-console flag is transitional: a frontend that carries penpot#13061
-# already turns it off in the devenv, so the flag is a no-op there.
+# already turns it off in the devenv, so the flag is a no-op there. It comes
+# first because the last flag wins, so PDV_PENPOT_FLAGS=enable-admin-console
+# still turns the module back on.
 config_js_content() {
   local flags="${PDV_PENPOT_FLAGS-}"
   if [ -z "$flags" ] && [ "${1:-false}" = true ]; then flags=enable-mcp; fi
-  printf 'var penpotFlags = "%s";\n' "${flags:+$flags }disable-admin-console"
+  printf 'var penpotFlags = "%s";\n' "disable-admin-console${flags:+ $flags}"
 }
 
 # config.js is gitignored and lives under resources/public, which a frontend

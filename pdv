@@ -87,8 +87,9 @@ Environment
   PENPOT_REPO, PDV_REPO   checkout to act on, lower precedence than --repo
   DEVENV_JAVA_OPTS        heap cap, same as --java-opts
   DEVENV_VERBOSE=0        terse output (actions and warnings only)
-  PDV_PENPOT_FLAGS        flags for a generated config.js, before the
-                          disable-admin-console it always carries
+  PDV_PENPOT_FLAGS        flags for a generated config.js, after the
+                          disable-admin-console it always starts with, so
+                          enable-admin-console here wins
                           (default enable-mcp when agentic, else none)
   PDV_TMUX_MOUSE=1        tune turns the tmux mouse on
 
