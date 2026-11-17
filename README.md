@@ -83,10 +83,10 @@ When the container exits during a start, pdv reads the log and prints the diagno
 
 ```sh
 pdv status                      # every instance, with its state and window set
-pdv status --ws 2               # one instance, and a broken one prints its state and a log tail
+pdv status --ws 2               # one instance; a crashed one prints its state and a log tail
 pdv stop --watchers             # stop the three watcher windows, keep the instance
 pdv start --watchers            # start them again in the same windows
-pdv stop                        # stop the instance, through manage.sh stop-devenv
+pdv stop                        # stop the instance, through manage.sh stop-devenv; also removes a container already stopped
 pdv attach                      # tmux inside the instance
 pdv logs                        # follow the container log
 ```

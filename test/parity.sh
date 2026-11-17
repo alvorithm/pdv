@@ -13,8 +13,8 @@
 # With --fast, also prove the
 # adoption rules that only a running instance can show: --recreate keeps the
 # volumes, the tune repairs config.js, clojure-lsp and the skills link, the
-# heap cap reaches the JVMs, and status reports a stopped instance without
-# attaching.
+# heap cap reaches the JVMs, status tells a clean stop from a kill without
+# attaching, and the instance stop removes a container already stopped.
 #
 # Rootful docker is a separate daemon: --rootful runs the live matrix against
 # /var/run/docker.sock. The chosen workspaces must be stopped on the rootless
@@ -446,13 +446,31 @@ check_tune_live() {
 check_status_broken() {
   local n="$1" ctr out rc
   ctr=$(CTR_FOR "$n")
+  # A docker stop is a clean exit (143): reported as stopped, exit 0, no logs.
   dk stop "$ctr" >/dev/null 2>&1 || true
   out=$( ( cd "$ROOT" && "$PDV" status --ws "$n" ) 2>&1 ); rc=$?
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'status=exited' && printf '%s' "$out" | grep -q 'logs:'; then
-    ok "ws$n: status reports a stopped instance with its state and a logs tail"
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'stopped: exited cleanly' && ! printf '%s' "$out" | grep -q 'logs:'; then
+    ok "ws$n: status reports a cleanly stopped instance as stopped"
   else
-    bad "ws$n: status did not report the stopped instance as expected (rc=$rc)"
+    bad "ws$n: status did not report the cleanly stopped instance as expected (rc=$rc)"
     printf '%s\n' "$out" | sed 's/^/     /'
+  fi
+  # A SIGKILL (137) is a failure: state, logs tail, exit 1.
+  dk start "$ctr" >/dev/null 2>&1 || true
+  dk kill "$ctr" >/dev/null 2>&1 || true
+  out=$( ( cd "$ROOT" && "$PDV" status --ws "$n" ) 2>&1 ); rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'status=exited' && printf '%s' "$out" | grep -q 'logs:'; then
+    ok "ws$n: status reports a killed instance with its state and a logs tail"
+  else
+    bad "ws$n: status did not report the killed instance as expected (rc=$rc)"
+    printf '%s\n' "$out" | sed 's/^/     /'
+  fi
+  # A container that is already stopped is removed by the instance stop.
+  ( cd "$ROOT" && "$PDV" stop --ws "$n" ) >/dev/null 2>&1
+  if dk inspect "$ctr" >/dev/null 2>&1; then
+    bad "ws$n: pdv stop left the stopped container $ctr"
+  else
+    ok "ws$n: pdv stop removes a container that was already stopped"
   fi
   teardown "$n"
 }

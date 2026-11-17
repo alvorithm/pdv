@@ -148,6 +148,37 @@ container_state() {
     "$1" 2>/dev/null || true
 }
 
+# Every devenv main container on this daemon, running or not, sorted.
+devenv_containers() {
+  docker ps -a --filter 'name=^penpot-devenv-ws[0-9]+-main$' --format '{{.Names}}' | sort || true
+}
+
+# Exited on its own terms: exit 0, or 143 for the SIGTERM a docker stop, a
+# daemon restart, or a host shutdown sends. A SIGKILL (137), an OOM kill, or
+# any other code is a failure.
+stopped_cleanly() {
+  local s
+  s=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$1" 2>/dev/null) || return 1
+  case "$s" in
+    "exited 0 false"|"exited 143 false") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# manage.sh's stop brings down only running instances, so a container that
+# stopped outside pdv stays forever. Bring each such project down through
+# manage.sh's own stop-instance; volumes stay. Needs manage_load.
+remove_stopped_instances() {
+  local name idx
+  for name in "$@"; do
+    container_exists "$name" || continue
+    container_running "$name" && continue
+    idx="${name#penpot-devenv-ws}"; idx="${idx%-main}"
+    say "ws$idx: removing the stopped container $name (volumes stay)"
+    stop-instance "ws$idx"
+  done
+}
+
 published_ports() {
   docker port "$1" 2>/dev/null | sort || true
 }

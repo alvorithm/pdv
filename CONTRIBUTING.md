@@ -43,9 +43,15 @@ In Penpot: `manage.sh run-devenv` checks that the networks of an existing main c
 
 ### A failed start reports itself without an attach
 
-pdv today: a start waits for the running state, a five-second settle, the health endpoint, and the tmux session, and prints the container state and a log tail when any of them fails. `pdv status` lists every instance with its state, ports, tree, branch, and windows.
+pdv today: a start waits for the running state, a five-second settle, the health endpoint, and the tmux session, and prints the container state and a log tail when any of them fails. `pdv status` lists every instance with its state, ports, tree, branch, and windows, and reports a container that exited with 0 or 143 as stopped rather than broken.
 
 In Penpot: `manage.sh run-devenv` performs the same waits and reports, and a new `status-devenv` verb lists the instances. The same verb can feed a status widget.
+
+### A stop removes a container that is already stopped
+
+pdv today: `manage.sh stop-devenv` brings down only the instances that `list-running-instances` returns, which reads `docker ps`. A container stopped outside the devenv, by a Docker daemon restart or a host shutdown, is therefore never removed. Before it calls `manage.sh`, `pdv stop` passes each target main container that exists and is not running to `manage.sh`'s `stop-instance` (`lib/pdv-core.sh::remove_stopped_instances`).
+
+In Penpot: `stop-devenv` selects its targets from `docker ps -a`, so `--all` and `--ws N` bring down every instance whose main container exists, running or not. pdv then drops the pre-step.
 
 ### safe.directory is added once
 

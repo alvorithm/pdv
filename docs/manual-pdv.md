@@ -44,7 +44,7 @@ The test database is the exception: the instance overrides name `penpot_test` on
 
 `pdv start` and `pdv stop` toggling follow the same names. `stop --services frontend` sends an interrupt to the frontend window's panes and leaves the window and its shells in place. `start --services frontend` types the command back into the idle pane. A window that is absent is created at the next free index, so a backend-only instance can gain the exporter later. Before pdv starts a watcher it checks for `node_modules` in that service's tree and runs `./scripts/setup` when the directory is missing, because upstream installs those dependencies before its own windows exist and a backend-only run has not installed them.
 
-`stop` without a selector is not a window verb. It stops the instance through `manage.sh stop-devenv`, which also stops the shared infrastructure when no other instance remains.
+`stop` without a selector is not a window verb. It stops the instance through `manage.sh stop-devenv`, which also stops the shared infrastructure when no other instance remains. `manage.sh` stops only running instances, so a container that stopped outside pdv (a Docker daemon restart, a host shutdown) would stay forever. pdv therefore first removes the target's main container when it exists and is not running, through `manage.sh`'s own `stop-instance`, and `--all` does the same for every devenv container on the daemon. Volumes stay.
 
 ## The heap cap travels in `_JAVA_OPTIONS` because two scripts reset JAVA_OPTS
 
@@ -78,7 +78,7 @@ The network goes away after `manage.sh drop-devenv`, a Docker daemon restart, or
 
 ## Failures are reported in place, never through an attach
 
-A container that cannot come up reports its state (`status`, `running`, `exit`, `error`) and the last 80 log lines. A tmux session that does not appear within 120 seconds prints the last 40 log lines. The same report appears in `pdv status` for an instance that is running but broken, which pdv measures by asking the container's health endpoint and by looking for the tmux session. No verb attaches to a session to show a failure, because the reader may not have a terminal that can host tmux.
+A container that cannot come up reports its state (`status`, `running`, `exit`, `error`) and the last 80 log lines. A tmux session that does not appear within 120 seconds prints the last 40 log lines. The same report appears in `pdv status` for an instance that is running but broken, which pdv measures by asking the container's health endpoint and by looking for the tmux session, and for a container that exited with any code other than 0 or 143. Exit 143 is the SIGTERM that `docker stop`, a daemon restart, or a host shutdown sends, so `pdv status` reports such a container as stopped, prints no log tail, and does not count it as a failure. No verb attaches to a session to show a failure, because the reader may not have a terminal that can host tmux.
 
 A start waits for four things before it reports success: the container in the running state, a five-second settle after that, an answer from the health endpoint on port 8082, and the tmux session. The settle catches nginx dying just after Docker reports the container as running.
 
@@ -107,6 +107,6 @@ pdv runs against a rootless or a rootful Docker daemon. `--rootful` points the r
 
 ## pdv deletes no volumes and builds no images
 
-pdv never deletes a named volume. `--recreate` removes a container and leaves its volumes. `pdv stop` runs `manage.sh stop-devenv`, which removes the containers and keeps their volumes. `pdv run --ws N` creates or syncs the wsN slot on first use, and no pdv verb deletes the slot.
+pdv never deletes a named volume. `--recreate` removes a container and leaves its volumes. `pdv stop` runs `manage.sh stop-devenv`, which removes the containers and keeps their volumes, and before that removes any target container that had already stopped. `pdv run --ws N` creates or syncs the wsN slot on first use, and no pdv verb deletes the slot.
 
 The image is upstream's business. `./manage.sh pull-devenv` fetches it, `./manage.sh build-devenv` builds it locally, and `./manage.sh drop-devenv` removes it on a full teardown. A stale image shows up as a toolchain mismatch or a missing command inside the container, and the fix is a pull followed by a stop and a run.

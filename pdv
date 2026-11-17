@@ -415,9 +415,13 @@ cmd_stop() {
     if $all && $WS_GIVEN; then
       die "stop: --all and --ws are mutually exclusive (manage.sh refuses both too)"
     fi
+    manage_load
     if $all; then
+      # shellcheck disable=SC2046  # container names carry no spaces
+      remove_stopped_instances $(devenv_containers)
       exec "$ROOT/manage.sh" stop-devenv --all
     fi
+    remove_stopped_instances "$CTR"
     exec "$ROOT/manage.sh" stop-devenv --ws "$WS_INDEX"
   fi
   take_service_flags "$@"
@@ -438,7 +442,7 @@ cmd_status() {
     status_instance "$WS_INDEX"
   else
     local names name idx rc=0
-    names=$(docker ps -a --filter 'name=^penpot-devenv-ws[0-9]+-main$' --format '{{.Names}}' | sort || true)
+    names=$(devenv_containers)
     if [ -z "$names" ]; then
       say "no Penpot devenv containers on this daemon (rootless: $DOCKER_HOST)"
       return 0
@@ -471,6 +475,12 @@ status_instance() {
     sub "branch:  $branch"
   fi
   if [ "$running" != "true" ]; then
+    if stopped_cleanly "$name"; then
+      # Stopped outside pdv (a daemon restart, a host shutdown): nothing is
+      # broken, and pdv's own stop would have removed the container.
+      sub "stopped: exited cleanly; pdv stop --ws $idx removes the container and keeps its volumes"
+      return 0
+    fi
     broken=true; reason="main container is not running"
   else
     session=$(docker exec "$name" sudo -EH -u penpot tmux has-session -t "$SESSION" 2>/dev/null && echo yes || echo no)
