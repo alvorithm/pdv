@@ -4,16 +4,16 @@
 # project created here '<YYYYMMDD> <Area>: <what it shows>'.
 description: The default users of a worktree database, with no fixtures
 users:
-  - email: odysseus@penpot.app
-    fullname: Odysseus
+  - email: zeus@penpot.app
+    fullname: Zeus
     password: "123123"
-  - email: hermes@penpot.app
-    fullname: Hermes
+  - email: aeolus@penpot.app
+    fullname: Aeolus
     password: "123123"
     agent: true
 teams:
   - name: Work on this worktree
     members:
-      - {email: odysseus@penpot.app, role: owner}
-      - {email: hermes@penpot.app, role: editor}
+      - {email: zeus@penpot.app, role: owner}
+      - {email: aeolus@penpot.app, role: editor}
 bundles: []

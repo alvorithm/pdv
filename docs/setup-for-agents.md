@@ -151,7 +151,7 @@ ls ~/Code/penpot-fixtures/profiles
 
 Success: the `ls` lists `profiles/<name>.yaml` files. `~/Code/penpot-fixtures` is pdv's default, so no variable is needed when the clone lands there. A clone elsewhere needs `PDV_FIXTURES` pointing at it, as in `export PDV_FIXTURES=~/src/penpot-fixtures`.
 
-Failure: `Permission denied (publickey)`, or a 404 over `https`, means no access yet. Ask the repository's owner for collaborator access. Without the repository the procedure continues: pdv's built-in profile creates `odysseus@penpot.app` and `hermes@penpot.app` in an `Ithaca` team, imports nothing, and still writes the agent file in step 7.
+Failure: `Permission denied (publickey)`, or a 404 over `https`, means no access yet. Ask the repository's owner for collaborator access. Without the repository the procedure continues: pdv's built-in profile creates `zeus@penpot.app` and `aeolus@penpot.app` in the team "Work on this worktree", imports nothing, and still writes the agent file in step 7.
 
 Then seed:
 
@@ -163,11 +163,11 @@ pdv seed status
 
 Success: `pdv run` prints `seed: staging the profile 'branching' for pdvwt_<slug> (bucket pdvwt-<slug>)` before the container starts, then `seed: applied the profile` and `seed: wrote <tree>/.pdv-agent.json (mode 600)` once the backend answers. `pdv seed status` prints `seed status: ws0, database pdvwt_<slug>, bucket pdvwt-<slug>` and then `profile:`, `worktree:`, `hash:`, `seeded at:`, `schema head:`, and one `files:` line per imported source.
 
-Every shipped profile seeds named accounts from the same cast, and every account's password is `123123`. A human logs in at `https://localhost:3449` as the owner, `odysseus@penpot.app`, with `123123`. The agent account is `hermes@penpot.app`, and step 7 reads its token from `.pdv-agent.json`.
+Every shipped profile seeds named accounts from the same cast, and every account's password is `123123`. A human logs in at `https://localhost:3449` as the owner, `zeus@penpot.app`, with `123123`. The agent account is `aeolus@penpot.app`, and step 7 reads its token from `.pdv-agent.json`.
 
 The database name follows the worktree directory: `penpot-iop-vc-preview` becomes `pdvwt_penpot_iop_vc_preview`, with the bucket `pdvwt-penpot-iop-vc-preview`. A second run with the same profile imports nothing, because the input hash matches. A changed profile rebuilds the database before the backend starts, because an import always assigns new file ids.
 
-The name is remembered per worktree. `PDV_SEED_DEFAULT=branching pdv run` seeds that profile in every worktree that chose none, and `pdv run --seed none` forgets the choice and keeps the built-in users.
+The name is remembered per worktree. `PDV_SEED_DEFAULT=branching pdv run` seeds that profile in every worktree that chose none, and `pdv run --seed none` forgets the choice, after which `PDV_SEED_DEFAULT` applies, or pdv's built-in profile when that variable is unset.
 
 Failure: a profile name that does not exist stops the run before any window starts, with `seed: profile '<name>' is not in <PDV_FIXTURES>/profiles`. Fix the name or the clone path, never the database. `seed: the instance is up but not seeded` means the backend did not answer in time, and `pdv seed` retries the whole post-start half. A seed needs a backend window, so `pdv run --services frontend` reports `seed: no backend window selected, so nothing was seeded`. `seed status: the shared postgres is not running` means no instance is up, and `seed status: <db> does not exist yet` means this worktree's database has not been created.
 
@@ -194,13 +194,13 @@ TOKEN=$(sed -E 's/.*"token"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' /home/penpo
 curl -ks -H "Authorization: Token $TOKEN" https://localhost:3449/api/rpc/command/get-teams
 ```
 
-Success: the file exists with mode `-rw-------`, and the RPC answers with a JSON array of teams, `[]` included for an account that belongs to none. The file holds four keys: `url`, `email`, `token`, and `database`, and `email` names `hermes@penpot.app` in every shipped profile.
+Success: the file exists with mode `-rw-------`, and the RPC answers with a JSON array of teams, `[]` included for an account that belongs to none. The file holds four keys: `url`, `email`, `token`, and `database`, and `email` names `aeolus@penpot.app` in every shipped profile.
 
 The token is a credential. Never print it, never pass it on a command line that the shell history keeps, and never commit it. pdv keeps the file out of `git status` by adding `/.pdv-agent.json` to the repository's `<git-common-dir>/info/exclude`.
 
 The port is always 3449 inside the container, because that is the container's own nginx. The `url` field carries the host-facing URL, which differs on a second instance: `https://localhost:13449` on ws1. Call the URL from the file when you are on the host, and `https://localhost:3449` when you are in the container.
 
-`get-profile` is the second check, and it prints the `fullname` and `id` behind the token, `Hermes` for the agent every shipped profile seeds:
+`get-profile` is the second check, and it prints the `fullname` and `id` behind the token, `Aeolus` for the agent every shipped profile seeds:
 
 ```sh
 curl -ks -H "Authorization: Token $TOKEN" https://localhost:3449/api/rpc/command/get-profile
