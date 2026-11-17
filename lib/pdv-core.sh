@@ -167,7 +167,9 @@ stopped_cleanly() {
 
 # manage.sh's stop brings down only running instances, so a container that
 # stopped outside pdv stays forever. Bring each such project down through
-# manage.sh's own stop-instance; volumes stay. Needs manage_load.
+# manage.sh's own stop-instance; volumes stay. Best effort: one project that
+# cannot come down must not keep manage.sh from stopping the running ones.
+# Needs manage_load.
 remove_stopped_instances() {
   local name idx
   for name in "$@"; do
@@ -175,7 +177,7 @@ remove_stopped_instances() {
     container_running "$name" && continue
     idx="${name#penpot-devenv-ws}"; idx="${idx%-main}"
     say "ws$idx: removing the stopped container $name (volumes stay)"
-    stop-instance "ws$idx"
+    stop-instance "ws$idx" || warn "ws$idx: could not remove $name; remove it with: docker rm $name"
   done
 }
 
