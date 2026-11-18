@@ -823,10 +823,12 @@ cmd_seed_verify() {
   seed_resolve_selection
   container_running "$CTR" || die "seed verify: $CTR is not running; bring it up with: pdv run --ws $WS_INDEX"
   $SEED_ENABLED || die "seed verify: $PDV_DB is the shared database, which pdv never seeds"
-  [ "$(seed_live_backend_db)" = "$PDV_DB" ] \
-    || die "seed verify: no backend of $CTR runs on $PDV_DB; start it with: pdv start --services backend --ws $WS_INDEX"
-  seed_stage_reset || die "seed verify: could not stage the driver"
+  seed_backend_selected \
+    || die "seed verify: $CTR has no backend window; start it with: pdv start --services backend --ws $WS_INDEX"
   seed_wait_backend || die "seed verify: the backend is not ready"
+  [ "$(seed_live_backend_db)" = "$PDV_DB" ] \
+    || die "seed verify: the backend of $CTR is not on $PDV_DB; move it there with: pdv seed --ws $WS_INDEX"
+  seed_stage_reset || die "seed verify: could not stage the driver"
   say "seed verify: opening every seeded file in $PDV_DB"
   local rc=0
   seed_driver verify >/dev/null || rc=$?
