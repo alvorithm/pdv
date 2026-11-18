@@ -115,6 +115,7 @@ Environment
   PDV_SEED_DEFAULT        profile name for a worktree that chose none
   PDV_SEED_TIMEOUT        seconds to wait for the backend before a seed
                           gives up (default 900)
+  PDV_SEED_DEBUG=1        the seed driver prints each GitHub API call
   Any PDV_* variable can also live in ${XDG_CONFIG_HOME:-~/.config}/pdv/env,
   one PDV_NAME=value per line (a leading ~/ expands); the environment wins.
 

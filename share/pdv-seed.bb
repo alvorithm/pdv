@@ -82,6 +82,12 @@
     (println (redact (apply format fmt args)))
     (flush)))
 
+(defn- debug
+  "Trace line on stderr, only when PDV_SEED_DEBUG is set."
+  [fmt & args]
+  (when-not (str/blank? (System/getenv "PDV_SEED_DEBUG"))
+    (apply say (str "debug: " fmt) args)))
+
 (defn- die
   "Message on stderr, then exit with code."
   [code fmt & args]
@@ -493,29 +499,43 @@
              "Accept" "application/vnd.github+json"}
       (not (str/blank? (str token))) (assoc "Authorization" (str "Bearer " token)))))
 
+;; One recursive tree per (owner, repo, rev) for this run, so a profile that
+;; pins many files at one revision makes one trees API call.
+(def ^:private github-trees (atom {}))
+
+(defn- github-tree
+  "The recursive tree of a repository at a revision, as parsed JSON."
+  [owner repo rev]
+  (let [k [owner repo rev]]
+    (or (get @github-trees k)
+        (let [url (str "https://api.github.com/repos/" owner "/" repo "/git/trees/" rev "?recursive=1")
+              _ (debug "GET %s" url)
+              resp (try (http/get url {:headers (github-headers) :throw false :timeout 60000})
+                        (catch Exception e
+                          (die 2 "the GitHub API request for %s/%s failed: %s"
+                               owner repo (ex-message e))))
+              status (:status resp)
+              body (try (json/parse-string (str (:body resp)))
+                        (catch Exception _ nil))]
+          (when-not (= 200 status)
+            (die 2 "the GitHub API answered %s for %s/%s at %s: %s"
+                 status owner repo rev (or (get body "message") "no message")))
+          (swap! github-trees assoc k body)
+          body))))
+
 (defn- github-tree-oid
   "Resolve a path at a revision to its git object id."
   [{:keys [owner repo rev path]}]
-  (let [url (str "https://api.github.com/repos/" owner "/" repo "/git/trees/" rev "?recursive=1")
-        resp (try (http/get url {:headers (github-headers) :throw false :timeout 60000})
-                  (catch Exception e
-                    (die 2 "the GitHub API request for %s/%s failed: %s"
-                         owner repo (ex-message e))))
-        status (:status resp)
-        body (try (json/parse-string (str (:body resp)))
-                  (catch Exception _ nil))]
-    (when-not (= 200 status)
-      (die 2 "the GitHub API answered %s for %s/%s at %s: %s"
-           status owner repo rev (or (get body "message") "no message")))
-    (let [hit (some (fn [entry] (when (= path (get entry "path")) entry))
-                    (get body "tree"))]
-      (cond
-        hit (or (get hit "sha") (get hit "oid"))
-        (true? (get body "truncated"))
-        (die 2 "the tree of %s/%s at %s is truncated and does not list %s, use a full commit sha"
-             owner repo rev path)
-        :else
-        (die 2 "%s is not a file in %s/%s at %s" path owner repo rev)))))
+  (let [body (github-tree owner repo rev)
+        hit (some (fn [entry] (when (= path (get entry "path")) entry))
+                  (get body "tree"))]
+    (cond
+      hit (or (get hit "sha") (get hit "oid"))
+      (true? (get body "truncated"))
+      (die 2 "the tree of %s/%s at %s is truncated and does not list %s, use a full commit sha"
+           owner repo rev path)
+      :else
+      (die 2 "%s is not a file in %s/%s at %s" path owner repo rev))))
 
 (defn- head-status [url]
   (try

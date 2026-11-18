@@ -496,8 +496,11 @@ seed_stage_secret() {
   docker exec "$CTR" chmod 600 "$SEED_STAGE/secret/$n" 2>/dev/null || true
 }
 
+# PDV_SEED_DEBUG reaches the driver, which then traces its GitHub API calls.
 seed_driver() {
-  docker exec "$CTR" sudo -EH -u penpot bb "$SEED_STAGE/pdv-seed.bb" "$@"
+  local -a env=()
+  [ -z "${PDV_SEED_DEBUG:-}" ] || env=(-e "PDV_SEED_DEBUG=$PDV_SEED_DEBUG")
+  docker exec ${env[@]+"${env[@]}"} "$CTR" sudo -EH -u penpot bb "$SEED_STAGE/pdv-seed.bb" "$@"
 }
 
 # Stages everything `needs` asks for, then asks the driver for the input hash.

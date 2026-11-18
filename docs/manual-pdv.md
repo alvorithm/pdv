@@ -70,6 +70,8 @@ The seed itself runs after the backend answers: pdv waits for the backend's nREP
 
 A second run with the same profile imports nothing. pdv computes an input hash over the profile text, every staged fixture file, and every remote source, and compares it with the hash the last seed recorded. When it differs, pdv drops the database, empties the bucket, recreates the database, and only then starts the backend, because an import always assigns new file ids and a merge into the old database would leave both sets behind.
 
+A `git+` source resolves through GitHub's trees API, which allows 60 calls an hour without `GITHUB_TOKEN`. The driver fetches each repository's tree once per revision and looks every path up in it, so a profile that pins 17 files at one commit costs one call each time pdv stages it. `PDV_SEED_DEBUG=1` makes the driver print each trees API call on stderr.
+
 The database survives `pdv stop`. It disappears with the worktree: before a `pdv run` and before `pdv stop --all` brings the shared infrastructure down, pdv sweeps the `pdvwt_*` databases whose recorded `worktree_path` no longer exists and removes their buckets. The sweep is best effort, so an unreachable postgres or object store warns and the rest of the command continues. What is not exported disappears with the worktree.
 
 ```sh
