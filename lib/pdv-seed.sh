@@ -660,11 +660,16 @@ seed_apply() {
     extra+=(--profile "$SEED_PROFILE")
   fi
   # Its stdout is the result EDN, which nothing on the host reads; the
-  # driver's human summary goes to stderr.
+  # driver's human summary and its per-item table go to stderr. Exit 3 means
+  # a keep_going profile seeded with failed items: the database is usable.
+  local rc=0
   seed_driver apply --slug "$(seed_slug "$(basename "$SEED_TREE")")" \
-    --hash "$SEED_INPUT_HASH" ${extra[@]+"${extra[@]}"} >/dev/null \
-    || { warn "seed: the driver could not apply the profile (see its message above)"; return 1; }
-  return 0
+    --hash "$SEED_INPUT_HASH" ${extra[@]+"${extra[@]}"} >/dev/null || rc=$?
+  case "$rc" in
+    0|3) return "$rc" ;;
+  esac
+  warn "seed: the driver could not apply the profile (see its message above)"
+  return 1
 }
 
 # Writes <tree>/.pdv-agent.json and keeps it out of git status. The file is a
@@ -745,6 +750,7 @@ seed_backend_on_pdv_db() {
 
 # The whole post-start half: wait for the backend, apply, write the agent file.
 # A failure warns and leaves the instance running; `pdv seed` retries it.
+# Returns 3 when the profile applied with failed items.
 seed_after_start() {
   $SEED_ENABLED || return 0
   if ! seed_backend_selected; then
@@ -758,14 +764,18 @@ seed_after_start() {
     imp "retry with: pdv seed --ws $WS_INDEX"
     return 1
   }
-  seed_apply || {
-    warn "seed: the profile did not apply; the instance is up"
-    imp "retry with: pdv seed --ws $WS_INDEX"
-    return 1
-  }
-  say "seed: applied the profile"
+  local rc=0
+  seed_apply || rc=$?
+  case "$rc" in
+    0) say "seed: applied the profile" ;;
+    3) warn "seed: applied the profile with failed items (table above); the instance is up"
+       imp "list them again with: pdv seed status --ws $WS_INDEX" ;;
+    *) warn "seed: the profile did not apply; the instance is up"
+       imp "retry with: pdv seed --ws $WS_INDEX"
+       return 1 ;;
+  esac
   seed_copy_agent_json || true
-  return 0
+  return "$rc"
 }
 
 # --------------------------------------------------------------- the commands
@@ -795,7 +805,13 @@ cmd_seed() {
   say "seed: staging the profile '${SEED_PROFILE:-default}'"
   seed_stage_all || die "seed: staging failed"
   seed_rebuild || die "seed: could not rebuild $PDV_DB"
-  seed_after_start || exit 1
+  local rc=0
+  seed_after_start || rc=$?
+  case "$rc" in
+    0) ;;
+    3) exit 3 ;;
+    *) exit 1 ;;
+  esac
 }
 
 # pdv seed status [--ws N]: what the database holds, from pdv_meta and
@@ -827,18 +843,33 @@ cmd_seed_status() {
   sub "hash:        ${input_hash:-<unseeded>}"
   sub "seeded at:   ${seeded:-<never>}"
   sub "schema head: ${schema:-<unknown>}"
+  # A table an older engine wrote has no verdict column and no failed rows.
+  local imported_only="" failed=""
+  if [ "$(seed_psql "$PDV_DB" -c "SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'pdv_seed_file' AND column_name = 'verdict'" 2>/dev/null || true)" = "1" ]; then
+    imported_only="WHERE f.verdict <> 'failed'"
+    failed=$(seed_psql "$PDV_DB" -c \
+      "SELECT source || '  ' || coalesce(error, '-')
+         FROM pdv_seed_file WHERE verdict = 'failed'
+        ORDER BY source" 2>/dev/null || true)
+  fi
   files=$(seed_psql "$PDV_DB" -c \
     "SELECT f.source || '  sha256=' || coalesce(f.sha256, '-') ||
             '  project=' || coalesce(p.name, f.project_id, '-') ||
             '  file=' || coalesce(f.file_id, '-')
        FROM pdv_seed_file AS f
        LEFT JOIN project AS p ON (p.id::text = f.project_id)
+      $imported_only
       ORDER BY f.source, f.imported_at, f.file_id" 2>/dev/null || true)
   if [ -n "$files" ]; then
     sub "files:"
     while IFS= read -r row; do sub "  $row"; done <<<"$files"
   else
     sub "files:       none recorded"
+  fi
+  if [ -n "$failed" ]; then
+    sub "failed:"
+    while IFS= read -r row; do sub "  $row"; done <<<"$failed"
   fi
   return 0
 }

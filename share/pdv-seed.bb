@@ -5,7 +5,8 @@
 ;; "Container-side driver" and "Remote sources and the download cache".
 ;;
 ;; stdout carries the protocol, stderr carries human text. Exit 0 on success,
-;; 1 on a refused profile (or a refused flag), 2 on an internal error.
+;; 1 on a refused profile (or a refused flag), 2 on an internal error, and 3
+;; when a keep_going seed finished with failed items.
 ;;
 ;; The staging root is /tmp/pdv-seed, and PDV_SEED_DIR relocates it for testing.
 
@@ -42,7 +43,7 @@
 (def ^:private default-password "123123")
 
 (def ^:private roles #{"owner" "admin" "editor" "viewer"})
-(def ^:private top-keys #{:description :backend_heap :users :teams :bundles :generators})
+(def ^:private top-keys #{:description :backend_heap :keep_going :users :teams :bundles :generators})
 (def ^:private user-keys #{:email :fullname :password :password_file :agent})
 (def ^:private team-keys #{:name :members})
 (def ^:private member-keys #{:email :role})
@@ -449,6 +450,9 @@
         (when-not (and (string? (:backend_heap data))
                        (re-find #"^[1-9][0-9]*[mMgG]$" (:backend_heap data)))
           (bad! "backend_heap must be a quoted -Xmx size such as \"2g\" or \"1536m\"")))
+      (when (some? (:keep_going data))
+        (when-not (boolean? (:keep_going data))
+          (bad! "keep_going must be true or false")))
       (let [users (validate-users bad! (list-section bad! :users data))
             _ (when (empty? users) (bad! "users must list at least one user"))
             teams (validate-teams bad! (list-section bad! :teams data) (user-emails users))
@@ -470,6 +474,7 @@
           {:text text
            :description (:description data)
            :backend-heap (:backend_heap data)
+           :keep-going? (true? (:keep_going data))
            :users users
            :teams teams
            :bundles bundles
@@ -670,10 +675,11 @@
     []))
 
 (defn- cmd-hash []
-  ;; backend_heap tunes the JVM, not the data, so changing it must not drop the
-  ;; database. A profile without the key hashes exactly as before it existed.
+  ;; backend_heap tunes the JVM and keep_going the failure policy, not the
+  ;; data, so changing either must not drop the database. A profile without
+  ;; the keys hashes exactly as before they existed.
   (let [{:keys [text]} (load-profile)
-        text (str/replace text #"(?m)^backend_heap:[^\n]*\n?" "")
+        text (str/replace text #"(?m)^(backend_heap|keep_going):[^\n]*\n?" "")
         parts (concat [(str "profile\t" text)]
                       (map (fn [[rel p]] (str "file\t" rel "\t" (sha256-file p)))
                            (staged-repo-files))
@@ -785,6 +791,46 @@
                                       :loaded))
                "loading the seed engine")
   nil)
+
+;; ---------------------------------------------------------------- item tables
+
+(defn- short-source
+  "The part of a source a person reads: the path of a git+ source, the file
+  of an https one, and a repository path as it is."
+  [source]
+  (let [s (str source)]
+    (case (source-kind s)
+      :git (subs s (inc (str/index-of s "#")))
+      :https (last (str/split (first (str/split s #"#")) #"/"))
+      s)))
+
+(defn- error-cell [{:keys [message paths more-paths]}]
+  (cond
+    (seq paths) (str (str/join " " (map pr-str paths))
+                     (when (pos? (or more-paths 0)) (str " +" more-paths)))
+    message message
+    :else "-"))
+
+(defn- print-table
+  "Rows of cells on stderr, each column padded to its widest cell."
+  [header rows]
+  (let [rows (cons header rows)
+        widths (apply map (fn [& cells] (apply max (map count cells))) rows)]
+    (doseq [row rows]
+      (say "  %s" (str/trimr (str/join "  " (map (fn [w c] (format (str "%-" w "s") c))
+                                                  widths row)))))))
+
+(defn- print-items
+  "One row per bundle and generator: source, file names, verdict, error."
+  [items]
+  (when (seq items)
+    (print-table ["SOURCE" "FILE" "VERDICT" "ERROR"]
+                 (map (fn [{:keys [source names verdict error]}]
+                        [(short-source source)
+                         (if (seq names) (str/join ", " names) "-")
+                         (name (or verdict :unknown))
+                         (if error (error-cell error) "-")])
+                      items))))
 
 ;; ---------------------------------------------------------------- apply
 
@@ -961,7 +1007,8 @@
                                           (:teams profile))
                              :bundles (mapv #(bundle-request profile %) (:bundles profile))
                              :generators (mapv #(generator-request profile %) (:generators profile))}
-                      (some? profile-name) (assoc :profile profile-name))
+                      (some? profile-name) (assoc :profile profile-name)
+                      (:keep-going? profile) (assoc :keep-going true))
             conn (nrepl-connect)]
         (try
           (load-engine! conn)
@@ -971,10 +1018,17 @@
             (write-agent-json! profile (:secrets result) database)
             (println (pr-str (dissoc result :secrets)))
             (flush)
-            (say "seeded %s into %s: %s users, %s teams, %s files, schema %s"
-                 slug database
-                 (count (:users profile)) (count (:teams profile))
-                 (count (:files result)) (or (:schema-head result) "-")))
+            (let [items (:items result)
+                  failed (count (filter #(= :failed (:verdict %)) items))]
+              (print-items items)
+              (say "seeded %s into %s: %s users, %s teams, %s imported, %s failed, schema %s"
+                   slug database
+                   (count (:users profile)) (count (:teams profile))
+                   (count (filter #(= :imported (:verdict %)) items)) failed
+                   (or (:schema-head result) "-"))
+              (when (pos? failed)
+                (nrepl-close! conn)
+                (System/exit 3))))
           (finally (nrepl-close! conn)))))))
 
 ;; ---------------------------------------------------------------- status and export
@@ -982,7 +1036,7 @@
 (defn- meta-value [meta & keys]
   (some (fn [k] (when (contains? meta k) (get meta k))) keys))
 
-(defn- print-status [{:keys [meta files]}]
+(defn- print-status [{:keys [meta files failures]}]
   (let [meta (or meta {})
         files (or files [])]
     (println (str "profile:  " (or (meta-value meta :profile) "none")))
@@ -996,7 +1050,11 @@
       (let [ids (:file-ids f)]
         (println (str "  " (or (:source f) "-")
                       "  " (if (sequential? ids) (count ids) 0) " file(s)"
-                      "  project " (or (:project f) "-")))))))
+                      "  project " (or (:project f) "-")))))
+    (when (seq failures)
+      (println (str "failed:   " (count failures)))
+      (doseq [{:keys [source error]} failures]
+        (println (str "  " source "  " error))))))
 
 (defn- cmd-status []
   (let [conn (nrepl-connect)]

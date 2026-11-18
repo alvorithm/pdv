@@ -43,6 +43,7 @@ A profile is one YAML file in the fixture repository, `$PDV_FIXTURES/profiles/<n
 - `bundles`: the files to import, each one either a path in the fixture repository or a source such as `git+https://github.com/<owner>/<repo>@<rev>#<path>`, with an optional team and project.
 - `generators`: programs in the repository that create files, with their arguments and target project.
 - `backend_heap`: an optional `-Xmx` size such as `"2g"` for the backend JVM, for profiles that import hub files (see "The heap cap travels in `_JAVA_OPTIONS`").
+- `keep_going`: `true` for a profile whose failures are the result, such as a battery of legacy files (see "A keep_going seed tries every item").
 
 The driver `share/pdv-seed.bb` runs in the container and stages what the profile names. The engine `share/seed.clj` is loaded into the running backend, where it creates the users, teams, and files with Penpot's own commands, imports each bundle, and records every import with its hash. A project a seed creates is named `<project> · schema <migration number>`, for example `branch-id-reroute · schema 0808`, so a fixture states which schema it was made against. The database's `migrations` table holds the full name of that step.
 
@@ -77,11 +78,23 @@ The database survives `pdv stop`. It disappears with the worktree: before a `pdv
 ```sh
 pdv seed                    # rebuild this instance's database and seed it again
 pdv seed branching          # switch the profile, then rebuild
-pdv seed status             # profile, hash, seeded-at, schema head, files per source
+pdv seed status             # profile, hash, seeded-at, schema head, files per source, failed items
 pdv bundle save bundles/branching/review-pair.penpot --project review-pair
 ```
 
 `pdv seed` is the manual rebuild: it stops the backend window, drops and recreates the database, empties the bucket, starts the backend again, and seeds. `pdv bundle save` exports a project, libraries included, into the fixture repository and prints the `git add` and `git commit` commands. It never commits.
+
+### A keep_going seed tries every item
+
+By default the first bundle or generator that throws aborts the seed: the items before it are imported, the items after it are never tried, and `pdv seed` exits 1. With `keep_going: true` the engine catches the failure of each item, records it in `pdv_seed_file` with the verdict `failed` and an error that holds the message, the code, and the schema paths of the refused values with every uuid removed, and carries on with the next item. The driver then prints one row per bundle and generator:
+
+```text
+  SOURCE                             FILE                        VERDICT   ERROR
+  Avataaars-by-Pablo-Stanley.penpot  Avataaars-by-Pablo-Stanley  failed    [:pages-index :objects :svg-attrs :filter]
+  welcome.penpot                     #8138 file                  imported  -
+```
+
+A seed with failed items exits 3, which means the database is seeded and usable. `pdv seed` exits 3 as well, `pdv run` prints the table and keeps the backend up, and `pdv seed status` lists the failed items after the files. The seed still records its input hash, so the next `pdv run` keeps the database and tries each failed item again without a rebuild. The key stays out of the input hash, so switching it on or off never rebuilds the database.
 
 ### The backend window carries the database and the bucket
 

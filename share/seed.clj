@@ -66,12 +66,21 @@
        " sha256 text,"
        " file_id text,"
        " project_id text,"
-       " imported_at timestamptz not null default now())"))
+       " imported_at timestamptz not null default now(),"
+       " verdict text not null default 'imported',"
+       " error text)"))
+
+;; A table an older engine created lacks the verdict columns.
+(def ^:private sql-add-verdict
+  (str "alter table pdv_seed_file"
+       " add column if not exists verdict text not null default 'imported',"
+       " add column if not exists error text"))
 
 (defn- ensure-tables!
   [system]
   (db/exec! system [sql-create-meta])
   (db/exec! system [sql-create-file])
+  (db/exec! system [sql-add-verdict])
   nil)
 
 ;; --- meta
@@ -317,9 +326,12 @@
 (def ^:private sql-recorded
   "select 1 as one from pdv_seed_file
     where source = ? and sha256 is not distinct from ?
+      and verdict <> 'failed'
     limit 1")
 
 (defn- recorded?
+  "True when this (source, sha256) was imported. A failed row does not
+  count, so the next seed tries the item again."
   [system source sha256]
   (some? (q1 system sql-recorded source sha256)))
 
@@ -334,6 +346,95 @@
                  :project-id (str project-id)
                  :imported-at (ct/now)}))
   nil)
+
+(defn- forget-failures!
+  "Drop the failed rows of (source, sha256) before the item is tried again."
+  [system source sha256]
+  (db/exec! system ["delete from pdv_seed_file
+                      where source = ? and sha256 is not distinct from ?
+                        and verdict = 'failed'"
+                    source sha256])
+  nil)
+
+;; --- failures
+;;
+;; A failed item is reported by its message, its code, and the schema paths
+;; of the values the check refused. The paths drop every uuid, so one bad
+;; attribute repeated over a hundred shapes reads as one path.
+
+(defn- cause-chain
+  [^Throwable t]
+  (take-while some? (iterate #(some-> ^Throwable % .getCause) t)))
+
+(defn- schema-explain
+  "The first malli explain carried by the exception or one of its causes."
+  [t]
+  (some (fn [c] (:app.common.schema/explain (ex-data c))) (cause-chain t)))
+
+(defn- error-paths
+  "Distinct value paths of an explain, uuids removed."
+  [explain]
+  (into [] (comp (map (fn [{:keys [in]}] (into [] (remove uuid?) in)))
+                 (distinct))
+        (:errors explain)))
+
+(defn- failure
+  "What a failed item reports: message, code, and schema paths."
+  [t]
+  (let [code (some (fn [c] (:code (ex-data c))) (cause-chain t))
+        paths (error-paths (schema-explain t))
+        shown (vec (take 5 paths))]
+    {:message (or (ex-message t) (.getName (class t)))
+     :code (some-> code str)
+     :paths shown
+     :more-paths (- (count paths) (count shown))}))
+
+(defn- failure-text
+  "One line for the `error` column."
+  [{:keys [message code paths more-paths]}]
+  (str message
+       (when code (str " (code " code ")"))
+       (when (seq paths) (str " at " (str/join " " (map pr-str paths))))
+       (when (pos? more-paths) (str " and " more-paths " more"))))
+
+(defn- record-failure!
+  [system source sha256 error]
+  (db/insert! system :pdv-seed-file
+              {:source source
+               :sha256 sha256
+               :imported-at (ct/now)
+               :verdict "failed"
+               :error (failure-text error)})
+  nil)
+
+(defn- file-names
+  "Names of the imported files, for the per-item report."
+  [system file-ids]
+  (if (empty? file-ids)
+    []
+    (db/tx-run!
+     system
+     (fn [{:keys [::db/conn]}]
+       (mapv :name (q conn "select name from file where id = any(?) order by name"
+                      (db/create-array conn "uuid" (mapv parse-uuid file-ids))))))))
+
+(defn- attempt
+  "Run one item. With keep-going, a throw records a failed row and returns
+  the failed verdict; without it, the throw aborts the seed."
+  [system ctx {:keys [source sha256 label]} f]
+  (forget-failures! system source sha256)
+  (if-not (:keep-going? ctx)
+    (f)
+    (try
+      (f)
+      (catch Exception e
+        (let [error (failure e)]
+          (l/wrn :hint "pdv seed: item failed" :source source :error (failure-text error))
+          (record-failure! system source sha256 error)
+          {:source source
+           :verdict :failed
+           :names [label]
+           :error error})))))
 
 ;; --- bundles
 
@@ -387,7 +488,8 @@
                        :format format})))))
 
 (defn- import-bundle!
-  "Import one bundle, unless this (source, sha256) is already recorded."
+  "Import one bundle, unless this (source, sha256) is already recorded.
+  Returns the item's report row."
   [system ctx {:keys [path source sha256 team project]}]
   (let [source (or (some-> source str not-empty) (some-> path str not-empty))
         _ (when (nil? source)
@@ -398,34 +500,39 @@
     (if (recorded? system source sha256)
       (do
         (l/dbg :hint "pdv seed: bundle already imported" :source source)
-        nil)
-      (let [^java.io.File file (io/file (str path))
-            _ (when-not (.isFile file)
-                (throw (ex-info (str "bundle not found: " path)
-                                {:type :pdv-seed/invalid-request
-                                 :path path
-                                 :source source})))
-            label (or (some-> project str not-empty) (source-stem source))
-            {:keys [team-id profile-id project-id project-name]}
-            (ensure-project-for! system ctx team label)
-            result (import-package! system
-                                    {:profile-id profile-id
-                                     :team-id team-id
-                                     :project-id project-id}
-                                    (.toPath file)
-                                    source)
-            file-ids (into [] (comp (map str) (distinct)) (:file-ids result))]
-        (record! system {:source source
-                         :sha256 sha256
-                         :file-ids file-ids
-                         :project-id project-id})
-        (l/inf :hint "pdv seed: bundle imported"
-               :source source
-               :project project-name
-               :files (count file-ids))
-        {:source source
-         :file-ids file-ids
-         :project project-name}))))
+        {:source source :verdict :recorded})
+      (attempt
+       system ctx {:source source :sha256 sha256 :label (source-stem source)}
+       (fn []
+         (let [^java.io.File file (io/file (str path))
+               _ (when-not (.isFile file)
+                   (throw (ex-info (str "bundle not found: " path)
+                                   {:type :pdv-seed/invalid-request
+                                    :path path
+                                    :source source})))
+               label (or (some-> project str not-empty) (source-stem source))
+               {:keys [team-id profile-id project-id project-name]}
+               (ensure-project-for! system ctx team label)
+               result (import-package! system
+                                       {:profile-id profile-id
+                                        :team-id team-id
+                                        :project-id project-id}
+                                       (.toPath file)
+                                       source)
+               file-ids (into [] (comp (map str) (distinct)) (:file-ids result))]
+           (record! system {:source source
+                            :sha256 sha256
+                            :file-ids file-ids
+                            :project-id project-id})
+           (l/inf :hint "pdv seed: bundle imported"
+                  :source source
+                  :project project-name
+                  :files (count file-ids))
+           {:source source
+            :verdict :imported
+            :file-ids file-ids
+            :names (file-names system file-ids)
+            :project project-name}))))))
 
 ;; --- generators
 ;;
@@ -467,7 +574,8 @@
       gen)))
 
 (defn- run-generator!
-  "Run one generator, unless this (script, input hash) is already recorded."
+  "Run one generator, unless this (script, input hash) is already recorded.
+  Returns the item's report row."
   [system ctx {:keys [script args team project]}]
   (let [source (some-> script str not-empty)
         _ (when (nil? source)
@@ -477,29 +585,34 @@
     (if (recorded? system source sha256)
       (do
         (l/dbg :hint "pdv seed: generator already run" :script source)
-        nil)
-      (let [label (or (some-> project str not-empty) (generator-label source))
-            {:keys [team-id profile-id project-id project-name]}
-            (ensure-project-for! system ctx team label)
-            gen (load-generator! source)
-            result (gen {:system system
-                         :script source
-                         :profile-id profile-id
-                         :team-id team-id
-                         :project-id project-id
-                         :args (or args {})})
-            file-ids (into [] (comp (map str) (distinct)) result)]
-        (record! system {:source source
-                         :sha256 sha256
-                         :file-ids file-ids
-                         :project-id project-id})
-        (l/inf :hint "pdv seed: generator finished"
-               :script source
-               :project project-name
-               :files (count file-ids))
-        {:source source
-         :file-ids file-ids
-         :project project-name}))))
+        {:source source :verdict :recorded})
+      (attempt
+       system ctx {:source source :sha256 sha256 :label (generator-label source)}
+       (fn []
+         (let [label (or (some-> project str not-empty) (generator-label source))
+               {:keys [team-id profile-id project-id project-name]}
+               (ensure-project-for! system ctx team label)
+               gen (load-generator! source)
+               result (gen {:system system
+                            :script source
+                            :profile-id profile-id
+                            :team-id team-id
+                            :project-id project-id
+                            :args (or args {})})
+               file-ids (into [] (comp (map str) (distinct)) result)]
+           (record! system {:source source
+                            :sha256 sha256
+                            :file-ids file-ids
+                            :project-id project-id})
+           (l/inf :hint "pdv seed: generator finished"
+                  :script source
+                  :project project-name
+                  :files (count file-ids))
+           {:source source
+            :verdict :imported
+            :file-ids file-ids
+            :names (file-names system file-ids)
+            :project project-name}))))))
 
 ;; --- access tokens
 ;;
@@ -556,7 +669,8 @@
        :teams teams
        :teams-by-name (into {} (map (juxt :name identity)) teams)
        :default-team default
-       :input-hash hash})))
+       :input-hash hash
+       :keep-going? (true? (:keep-going request))})))
 
 ;; --- files of a project
 
@@ -628,19 +742,21 @@
 (defn seed!
   "Seed this database from one profile.
 
-  Request: `{:slug :hash :profile :users :teams :bundles :generators}`.
-  Returns `{:users :teams :files :schema-head :secrets}` with uuids as
-  strings and the agent tokens keyed by email."
+  Request: `{:slug :hash :profile :keep-going :users :teams :bundles
+  :generators}`. Returns `{:users :teams :items :schema-head :secrets}`
+  with uuids as strings, one item row per bundle and generator, and the
+  agent tokens keyed by email. An item row's `:verdict` is `:imported`,
+  `:recorded` (imported by an earlier seed), or `:failed`, which only a
+  `:keep-going` request returns instead of throwing."
   [request]
   (let [system (current-system)
         _ (ensure-tables! system)
         head (schema-head system)
         ctx (-> (db/tx-run! system #(prepare! % request))
                 (assoc :schema-head head))
-        bundles (into [] (keep #(import-bundle! system ctx %))
-                      (:bundles request))
-        generators (into [] (keep #(run-generator! system ctx %))
-                         (:generators request))
+        items (into (mapv #(import-bundle! system ctx %) (:bundles request))
+                    (map #(run-generator! system ctx %))
+                    (:generators request))
         secrets (reduce (fn [result {:keys [email agent?]}]
                           (if agent?
                             (let [profile-id (get-in ctx [:profiles email :id])]
@@ -658,11 +774,12 @@
          (write-meta! system "profile" profile))))
     (l/inf :hint "pdv seed: finished"
            :slug (:slug request)
-           :files (+ (count bundles) (count generators))
+           :imported (count (filter #(= :imported (:verdict %)) items))
+           :failed (count (filter #(= :failed (:verdict %)) items))
            :schema-head head)
     {:users (count (:users ctx))
      :teams (count (:teams ctx))
-     :files (into bundles generators)
+     :items items
      :schema-head head
      :secrets secrets}))
 
@@ -671,10 +788,17 @@
           p.name as project_name
      from pdv_seed_file as f
      left join project as p on (p.id = f.project_id::uuid)
+    where f.verdict <> 'failed'
     order by f.source asc, f.imported_at asc, f.file_id asc")
 
+(def ^:private sql-failures
+  "select source, error from pdv_seed_file
+    where verdict = 'failed'
+    order by source asc")
+
 (defn status
-  "What this database holds: the pdv_meta map and the seed records."
+  "What this database holds: the pdv_meta map, the seed records, and the
+  items whose last attempt failed."
   []
   (let [system (current-system)]
     (ensure-tables! system)
@@ -689,7 +813,8 @@
                          :project (:project_name (first rows))
                          :file-ids (mapv (comp str :file_id) rows)}))
                  (sort-by (juxt :source (comp str :sha256)))
-                 vec)}))
+                 vec)
+     :failures (mapv #(select-keys % [:source :error]) (q system sql-failures))}))
 
 (defn export-bundle!
   "Export every file of a project, libraries included, into one `.penpot`.

@@ -84,7 +84,8 @@ Seed (one database and one bucket per worktree)
                      `--db default` forgets the choice. Remembered likewise.
   seed [NAME]        rebuild the database from the profile and seed it again;
                      NAME changes the remembered profile first.
-  seed status        the profile, hash, seeded-at, schema head, and files.
+  seed status        the profile, hash, seeded-at, schema head, files, and
+                     the items whose last attempt failed.
   bundle save <relpath> --project NAME [--team NAME]
                      export a project into the fixture repository; never
                      commits.
