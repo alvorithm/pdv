@@ -28,7 +28,7 @@ A real directory in the slot makes `manage.sh` rsync a clone instead, and commit
 
 An agent session reaches the instance in slot N through the ports `4401 + N × 10000` (Penpot MCP) and `14181 + N × 10000` (Serena). `./manage.sh start-coding-agent <client> --ws N` starts a coding agent with those ports wired into its MCP configuration.
 
-Every instance shares one postgres, one object store, and the other infra services. The checkout that started postgres owns it, because postgres mounts its configuration from that checkout. A `pdv run` from another checkout starts only the services that are missing and never recreates a running one, so the backends already connected keep their connections. The configuration of another checkout takes effect only after every instance has stopped and the infra has come down.
+Every instance shares one postgres, one object store, and the other infra services. The checkout that started postgres owns it, because postgres mounts its configuration from that checkout. A `pdv run` from another checkout starts only the services that are missing and never recreates a running one, so the backends already connected keep their connections. The configuration of another checkout takes effect only after every instance has stopped and the infra has come down. The exception is an owner whose files are gone, as after `git worktree remove`: pdv warns and recreates postgres from the current checkout, because the old container could not start again.
 
 ## Each worktree gets its own database and bucket
 

@@ -55,7 +55,7 @@ In Penpot: `stop-devenv` selects its targets from `docker ps -a`, so `--all` and
 
 ### A second checkout leaves the shared postgres alone
 
-pdv today: `docker/devenv/docker-compose.infra.yml` bind-mounts `postgresql.conf` and the init script by a path relative to the checkout, so `manage.sh::ensure-infra-up` from a second checkout sees a changed configuration and recreates postgres, which drops the connections of every running backend. When the running postgres came from another checkout, pdv runs `up --no-recreate` without `--remove-orphans` instead (`lib/pdv-core.sh::ensure_shared_infra`).
+pdv today: `docker/devenv/docker-compose.infra.yml` bind-mounts `postgresql.conf` and the init script by a path relative to the checkout, so `manage.sh::ensure-infra-up` from a second checkout sees a changed configuration and recreates postgres, which drops the connections of every running backend. When the running postgres came from another checkout, pdv runs `up --no-recreate` without `--remove-orphans` instead. It still recreates postgres when a mount source of the running container is gone, as after a `git worktree remove`, because such a container cannot start again (`lib/pdv-core.sh::infra_up_mode`).
 
 In Penpot: the shared infra stops depending on the checkout that brings it up, for example by baking the two files into a devenv postgres image, or by `ensure-infra-up` passing `--no-recreate` when the project is already running. pdv then calls `ensure-infra-up` again.
 

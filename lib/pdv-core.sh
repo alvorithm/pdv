@@ -129,23 +129,42 @@ manage_load() {
 # came from another checkout, only start what is missing, and remove no
 # service the other checkout declares. Postgres decides, because the other
 # services mount nothing from the checkout and may each carry another one.
-infra_owner() {
-  docker ps --filter label=com.docker.compose.project=penpotdev-infra \
-    --filter label=com.docker.compose.service=postgres \
-    --format '{{.Label "com.docker.compose.project.config_files"}}' 2>/dev/null | head -1
+#
+# infra_up_mode MINE OWNER SOURCES: MINE is this checkout's compose file,
+# OWNER the config_files label of the running postgres (empty when none
+# runs), SOURCES its bind sources, one per line. Prints `up` (no postgres,
+# or this checkout's), `keep` (another checkout's, mounts intact), or
+# `stale` (another checkout's, and a mount source is gone, as after a
+# `git worktree remove`: such a container cannot start again, so recreate).
+infra_up_mode() {
+  local owner=${2%%,*} s
+  if [ -z "$owner" ] || [ "$(realpath -m "$owner")" = "$(realpath -m "$1")" ]; then
+    echo up; return
+  fi
+  while IFS= read -r s; do
+    if [ -n "$s" ] && [ ! -e "$s" ]; then echo stale; return; fi
+  done <<<"$3"
+  echo keep
 }
 
 ensure_shared_infra() {
-  local owner mine
-  owner=$(infra_owner)
-  mine=$(realpath -m "$ROOT/docker/devenv/docker-compose.infra.yml")
-  if [ -z "$owner" ] || [ "$(realpath -m "${owner%%,*}")" = "$mine" ]; then
-    ensure-infra-up
-    return
+  local c owner="" sources=""
+  c=$(docker ps -q --filter label=com.docker.compose.project=penpotdev-infra \
+        --filter label=com.docker.compose.service=postgres 2>/dev/null | head -1)
+  if [ -n "$c" ]; then
+    owner=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$c" 2>/dev/null)
+    sources=$(docker inspect -f '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}' "$c" 2>/dev/null)
   fi
-  say "shared infra: running from ${owner%%,*}; starting only what is missing"
-  why "an up from this checkout would recreate postgres under the running backends"
-  infra-compose up -d --no-recreate --wait --wait-timeout 60
+  case $(infra_up_mode "$ROOT/docker/devenv/docker-compose.infra.yml" "$owner" "$sources") in
+    keep)
+      say "shared infra: running from ${owner%%,*}; starting only what is missing"
+      why "an up from this checkout would recreate postgres under the running backends"
+      infra-compose up -d --no-recreate --wait --wait-timeout 60 ;;
+    stale)
+      warn "shared infra: postgres mounts files from ${owner%%,*}, which are gone; recreating it from this checkout drops the running backends' connections"
+      ensure-infra-up ;;
+    *) ensure-infra-up ;;
+  esac
 }
 
 # ---------------------------------------------------------------- containers

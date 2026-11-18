@@ -333,6 +333,30 @@ EOF
   fi
 }
 
+# Which `up` a run takes against the shared infra, from the running
+# postgres's compose file and bind sources. No daemon: the decision is pure.
+check_shared_infra_mode() {
+  local lib="$SELF/../lib/pdv-core.sh" tmp got want
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/parity-infra.XXXXXX")
+  mkdir -p "$tmp/a/docker/devenv/files" "$tmp/b/docker/devenv"
+  touch "$tmp/a/docker/devenv/files/postgresql.conf"
+  got=$( . "$lib"
+         mine="$tmp/b/docker/devenv/docker-compose.infra.yml"
+         other="$tmp/a/docker/devenv/docker-compose.infra.yml"
+         printf '%s\t%s\t%s\t%s' \
+           "$(infra_up_mode "$mine" "" "")" \
+           "$(infra_up_mode "$mine" "$mine" "")" \
+           "$(infra_up_mode "$mine" "$other" "$tmp/a/docker/devenv/files/postgresql.conf")" \
+           "$(infra_up_mode "$mine" "$other" "$tmp/a/docker/devenv/files/postgresql_init.sql")" )
+  rm -rf "$tmp"
+  want=$(printf 'up\tup\tkeep\tstale')
+  if [ "$got" = "$want" ]; then
+    ok "shared infra: no postgres or this checkout's is brought up, another checkout's is kept, one with a missing mount is recreated"
+  else
+    bad "shared infra mode differs (want '$want', got '$got')"
+  fi
+}
+
 # --------------------------------------------------------------- live checks
 CTR_FOR() { printf 'penpot-devenv-ws%s-main' "$1"; }
 
@@ -554,6 +578,7 @@ if [ "$MODE" = "offline" ]; then
   check_instance_validation
   check_seed_names
   check_status_empty_rootful
+  check_shared_infra_mode
 else
   IFS=',' read -ra WS_LIST <<<"$WSD"
   for n in "${WS_LIST[@]}"; do
