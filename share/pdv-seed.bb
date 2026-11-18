@@ -797,13 +797,15 @@
 
 (defn- short-source
   "The part of a source a person reads: the path of a git+ source, the file
-  of an https one, and a repository path as it is."
+  of an https one, and a repository path as it is. A generator's source is
+  its staged path, shown relative to the staged repository."
   [source]
-  (let [s (str source)]
+  (let [s (str source)
+        staged (str repo-root "/")]
     (case (source-kind s)
       :git (subs s (inc (str/index-of s "#")))
       :https (last (str/split (first (str/split s #"#")) #"/"))
-      s)))
+      (if (str/starts-with? s staged) (subs s (count staged)) s))))
 
 (defn- error-cell [{:keys [message paths more-paths]}]
   (cond

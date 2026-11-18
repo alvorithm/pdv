@@ -1,8 +1,9 @@
 ;; pdv seed engine.
 ;;
 ;; Evaluated inside the running backend JVM through the prepl, so this file
-;; must stay self contained and require only namespaces that exist on both
-;; `iop-vc-preview` and `origin/develop`. Contract:
+;; must stay self contained and load on `origin/develop`, `iop-vc-preview`,
+;; and the 2.19 release (`main`). A var that only some of them define is
+;; looked up with `resolve` at the call. Contract:
 ;; /home/alvar/Code/pdv/wip.local/20261117-pdv-seed/contract.md
 ;;
 ;; Entry points: `seed!`, `status`, `verify`, `export-bundle!`. Every step is
@@ -465,28 +466,48 @@
   (or (parent-name script)
       (str/replace (last (str/split (str script) #"/")) #"(?i)\.clj$" "")))
 
+(defn- legacy-import-cfg
+  "The cfg the 2.19 import RPC builds by hand, for trees that predate
+  `app.binfile.common/import-cfg`."
+  [system {:keys [profile-id project-id team input]}]
+  (assoc system
+         ::bfc/features (cfeat/get-team-enabled-features cf/flags team)
+         ::bfc/project-id project-id
+         ::bfc/profile-id profile-id
+         ::bfc/team-id (:id team)
+         ::bfc/name nil
+         ::bfc/input input
+         ::bfc/import-max-binary-entry-size (cf/get :binfile-import-max-binary-entry-size)
+         ::bfc/import-max-text-entry-size (cf/get :binfile-import-max-text-entry-size)
+         ::bfc/import-max-text-total-size (cf/get :binfile-import-max-text-total-size)
+         ::bfc/import-max-zip-entries (cf/get :binfile-import-max-zip-entries)))
+
 (defn- import-package!
   "Import one staged package. The magic bytes decide the format: v1 is a
-  zstd stream, v3 is a zip. Both return `{:file-ids [...]}`."
+  zstd stream, v3 is a zip. Returns `{:file-ids [...]}`."
   [system {:keys [profile-id team-id project-id]} input source]
   (let [format (bfc/parse-file-format input)
         ;; The import RPC's own lookup: app.binfile.common/get-team exists on
         ;; develop but not on staging, and a seed must load on both.
-        cfg (bfc/import-cfg system
-                            {:profile-id profile-id
-                             :project-id project-id
-                             :team (teams/get-team system
-                                                   :profile-id profile-id
-                                                   :team-id team-id)
-                             :name nil
-                             :input input})]
-    (case format
-      :binfile-v1 (bfv1/import-files! cfg)
-      :binfile-v3 (bfv3/import-files! cfg)
-      (throw (ex-info (str "unknown penpot package format: " (pr-str format))
-                      {:type :pdv-seed/invalid-request
-                       :source source
-                       :format format})))))
+        params {:profile-id profile-id
+                :project-id project-id
+                :team (teams/get-team system
+                                      :profile-id profile-id
+                                      :team-id team-id)
+                :name nil
+                :input input}
+        cfg (if-let [import-cfg (resolve 'app.binfile.common/import-cfg)]
+              (import-cfg system params)
+              (legacy-import-cfg system params))
+        result (case format
+                 :binfile-v1 (bfv1/import-files! cfg)
+                 :binfile-v3 (bfv3/import-files! cfg)
+                 (throw (ex-info (str "unknown penpot package format: " (pr-str format))
+                                 {:type :pdv-seed/invalid-request
+                                  :source source
+                                  :format format})))]
+    ;; 2.19 answers the ids themselves, develop a map that holds them.
+    {:file-ids (if (map? result) (:file-ids result) result)}))
 
 (defn- import-bundle!
   "Import one bundle, unless this (source, sha256) is already recorded.
