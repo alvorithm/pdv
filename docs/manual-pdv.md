@@ -28,6 +28,8 @@ A real directory in the slot makes `manage.sh` rsync a clone instead, and commit
 
 An agent session reaches the instance in slot N through the ports `4401 + N × 10000` (Penpot MCP) and `14181 + N × 10000` (Serena). `./manage.sh start-coding-agent <client> --ws N` starts a coding agent with those ports wired into its MCP configuration.
 
+Every instance shares one postgres, one object store, and the other infra services. The checkout that started postgres owns it, because postgres mounts its configuration from that checkout. A `pdv run` from another checkout starts only the services that are missing and never recreates a running one, so the backends already connected keep their connections. The configuration of another checkout takes effect only after every instance has stopped and the infra has come down.
+
 ## Each worktree gets its own database and bucket
 
 Every instance used to share the `penpot` database and the `penpot` bucket that `docker/devenv/defaults.env` configures, so two worktrees on branches with different migrations ran against one schema. pdv now gives each bound worktree a database and a bucket of its own.
@@ -43,7 +45,7 @@ A profile is one YAML file in the fixture repository, `$PDV_FIXTURES/profiles/<n
 - `bundles`: the files to import, each one either a path in the fixture repository or a source such as `git+https://github.com/<owner>/<repo>@<rev>#<path>`, with an optional team and project.
 - `generators`: programs in the repository that create files, with their arguments and target project.
 - `backend_heap`: an optional `-Xmx` size such as `"2g"` for the backend JVM, for profiles that import hub files (see "The heap cap travels in `_JAVA_OPTIONS`").
-- `keep_going`: `true` for a profile whose failures are the result, such as a battery of legacy files (see "A keep_going seed tries every item").
+- `keep_going`: `true` for a profile whose failures are the result, such as the fixture repository's `legacy-files` (see "A keep_going seed tries every item").
 
 The driver `share/pdv-seed.bb` runs in the container and stages what the profile names. The engine `share/seed.clj` is loaded into the running backend, where it creates the users, teams, and files with Penpot's own commands, imports each bundle, and records every import with its hash. A project a seed creates is named `<project> · schema <migration number>`, for example `branch-id-reroute · schema 0808`, so a fixture states which schema it was made against. The database's `migrations` table holds the full name of that step.
 
@@ -103,7 +105,7 @@ An import tests only the files that arrive through an import. A user's file sits
 
 For every file id that `pdv_seed_file` records, from bundles and generators alike, verify calls `app.binfile.common/get-file` with `:read-only? true` in a read-only transaction that rolls back, then `app.common.files.validate/validate-file-schema!` on the result, because a read does not check a file that needs no migration. A read-only read migrates in memory and runs the same data check a migration ends with, but writes nothing, so each file keeps its `revn` and its recorded migrations and a second run tests the same stored state. Verify prints one row per file (project, file name, verdict, and the schema paths of a failure) and exits 3 when any file fails.
 
-The fixture repository's `legacy-files` profile is the battery for a branch that changes what old files must pass: 17 hub files pinned at one penpot-files commit, and a generator that writes the file of penpot/penpot#13107, which no export can carry. `pdv seed legacy-files` on the branch is the import run. A seed on the release tree, a switch to the branch, and `pdv seed verify` are the upgrade run.
+The fixture repository's `legacy-files` profile serves a branch that changes what old files must pass: 17 hub files pinned at one penpot-files commit, and a generator that writes the file of penpot/penpot#13107, which no export can carry. `pdv seed legacy-files` on the branch is the import run. A seed on the release tree, a switch to the branch, and `pdv seed verify` are the upgrade run.
 
 ### The backend window carries the database and the bucket
 

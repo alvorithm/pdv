@@ -121,6 +121,33 @@ manage_load() {
   PDV_MANAGE_LOADED=1
 }
 
+# The shared infra is one compose project, but compose resolves the bind
+# mounts of docker-compose.infra.yml (postgresql.conf, the init script)
+# against the checkout that runs `up`. An `up` from a second checkout
+# therefore sees a changed configuration and recreates postgres, which
+# drops the connections of every running backend. When the running postgres
+# came from another checkout, only start what is missing, and remove no
+# service the other checkout declares. Postgres decides, because the other
+# services mount nothing from the checkout and may each carry another one.
+infra_owner() {
+  docker ps --filter label=com.docker.compose.project=penpotdev-infra \
+    --filter label=com.docker.compose.service=postgres \
+    --format '{{.Label "com.docker.compose.project.config_files"}}' 2>/dev/null | head -1
+}
+
+ensure_shared_infra() {
+  local owner mine
+  owner=$(infra_owner)
+  mine=$(realpath -m "$ROOT/docker/devenv/docker-compose.infra.yml")
+  if [ -z "$owner" ] || [ "$(realpath -m "${owner%%,*}")" = "$mine" ]; then
+    ensure-infra-up
+    return
+  fi
+  say "shared infra: running from ${owner%%,*}; starting only what is missing"
+  why "an up from this checkout would recreate postgres under the running backends"
+  infra-compose up -d --no-recreate --wait --wait-timeout 60
+}
+
 # ---------------------------------------------------------------- containers
 mount_src() {
   docker inspect -f \

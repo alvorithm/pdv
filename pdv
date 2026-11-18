@@ -295,7 +295,7 @@ cmd_run() {
 
   say "network + shared infra"
   ensure-devenv-network
-  ensure-infra-up
+  ensure_shared_infra
   # A worktree that is gone takes its database and bucket with it. Best
   # effort: an unreachable postgres must not stop a start.
   seed_sweep_orphans || warn "sweep: orphaned per-worktree databases were not checked"
