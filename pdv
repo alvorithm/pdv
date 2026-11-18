@@ -521,7 +521,8 @@ cmd_status() {
     local names name idx rc=0
     names=$(devenv_containers)
     if [ -z "$names" ]; then
-      say "no Penpot devenv containers on this daemon (rootless: $DOCKER_HOST)"
+      # DOCKER_HOST overrides the context when set; a rootful setup has none.
+      say "no Penpot devenv containers on this daemon (${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || echo unknown)})"
       return 0
     fi
     for name in $names; do

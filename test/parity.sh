@@ -313,6 +313,26 @@ check_seed_names() {
   fi
 }
 
+# A rootful daemon reached through the default context has no DOCKER_HOST.
+# A stub docker with no containers answers for it, so no daemon is needed.
+check_status_empty_rootful() {
+  local stub out rc
+  stub=$(mktemp -d "${TMPDIR:-/tmp}/parity-docker.XXXXXX")
+  cat >"$stub/docker" <<'EOF'
+#!/bin/sh
+[ "$1 $2" = "context inspect" ] && echo unix:///var/run/docker.sock
+exit 0
+EOF
+  chmod +x "$stub/docker"
+  out=$( cd "$ROOT" && env -u DOCKER_HOST PATH="$stub:$PATH" "$PDV" status 2>&1 ); rc=$?
+  rm -rf "$stub"
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qF 'unix:///var/run/docker.sock'; then
+    ok "status with no instance and no DOCKER_HOST names the context's daemon"
+  else
+    bad "status with no instance and no DOCKER_HOST failed (rc=$rc): $out"
+  fi
+}
+
 # --------------------------------------------------------------- live checks
 CTR_FOR() { printf 'penpot-devenv-ws%s-main' "$1"; }
 
@@ -533,6 +553,7 @@ if [ "$MODE" = "offline" ]; then
   check_heap_cap
   check_instance_validation
   check_seed_names
+  check_status_empty_rootful
 else
   IFS=',' read -ra WS_LIST <<<"$WSD"
   for n in "${WS_LIST[@]}"; do
