@@ -86,6 +86,9 @@ Seed (one database and one bucket per worktree)
                      NAME changes the remembered profile first.
   seed status        the profile, hash, seeded-at, schema head, files, and
                      the items whose last attempt failed.
+  seed verify        open every seeded file with the tree's current code,
+                     migrating in memory, and print a verdict per file.
+                     Exits 3 when a file fails.
   bundle save <relpath> --project NAME [--team NAME]
                      export a project into the fixture repository; never
                      commits.

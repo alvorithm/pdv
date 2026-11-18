@@ -5,7 +5,7 @@
 ;; `iop-vc-preview` and `origin/develop`. Contract:
 ;; /home/alvar/Code/pdv/wip.local/20261117-pdv-seed/contract.md
 ;;
-;; Entry points: `seed!`, `status`, `export-bundle!`. Every step is
+;; Entry points: `seed!`, `status`, `verify`, `export-bundle!`. Every step is
 ;; idempotent. A second identical call imports nothing and leaves the files
 ;; the first call imported in place.
 
@@ -16,6 +16,7 @@
    [app.binfile.v1 :as bfv1]
    [app.binfile.v3 :as bfv3]
    [app.common.features :as cfeat]
+   [app.common.files.validate :as fval]
    [app.common.logging :as l]
    [app.common.time :as ct]
    [app.common.uuid :as uuid]
@@ -810,11 +811,47 @@
                  (map (fn [[[source sha256] rows]]
                         {:source source
                          :sha256 sha256
-                         :project (:project_name (first rows))
-                         :file-ids (mapv (comp str :file_id) rows)}))
+                         :project (:project-name (first rows))
+                         :file-ids (mapv (comp str :file-id) rows)}))
                  (sort-by (juxt :source (comp str :sha256)))
                  vec)
      :failures (mapv #(select-keys % [:source :error]) (q system sql-failures))}))
+
+(def ^:private sql-seeded-files
+  "select f.file_id, p.name as project_name, fl.name as file_name
+     from pdv_seed_file as f
+     left join project as p on (p.id = f.project_id::uuid)
+     left join file as fl on (fl.id = f.file_id::uuid)
+    where f.verdict <> 'failed' and f.file_id is not null
+    order by p.name asc nulls last, fl.name asc nulls last, f.file_id asc")
+
+(defn- verify-file
+  "Open one file with the running code, migrating in memory, and check its
+  data against the schema. The transaction is read-only and rolls back, so
+  the stored file keeps its revn and its recorded migrations."
+  [system file-id]
+  (db/tx-run!
+   (assoc system ::db/read-only true ::db/rollback true)
+   (fn [cfg]
+     (-> (bfc/get-file cfg (parse-uuid file-id) :read-only? true :realize? true)
+         (fval/validate-file-schema!))
+     nil)))
+
+(defn verify
+  "Open every seeded file and return one row per file:
+  `{:project :name :file-id :verdict :error}`, verdict `:passed` or
+  `:failed`."
+  []
+  (let [system (current-system)]
+    (ensure-tables! system)
+    (mapv (fn [{:keys [file-id project-name file-name]}]
+            (let [row {:project project-name :name file-name :file-id file-id}]
+              (try
+                (verify-file system file-id)
+                (assoc row :verdict :passed)
+                (catch Exception e
+                  (assoc row :verdict :failed :error (failure e))))))
+          (q system sql-seeded-files))))
 
 (defn export-bundle!
   "Export every file of a project, libraries included, into one `.penpot`.

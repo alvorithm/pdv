@@ -79,6 +79,7 @@ The database survives `pdv stop`. It disappears with the worktree: before a `pdv
 pdv seed                    # rebuild this instance's database and seed it again
 pdv seed branching          # switch the profile, then rebuild
 pdv seed status             # profile, hash, seeded-at, schema head, files per source, failed items
+pdv seed verify             # open every seeded file with this tree's code, one verdict per file
 pdv bundle save bundles/branching/review-pair.penpot --project review-pair
 ```
 
@@ -95,6 +96,12 @@ By default the first bundle or generator that throws aborts the seed: the items 
 ```
 
 A seed with failed items exits 3, which means the database is seeded and usable. `pdv seed` exits 3 as well, `pdv run` prints the table and keeps the backend up, and `pdv seed status` lists the failed items after the files. The seed still records its input hash, so the next `pdv run` keeps the database and tries each failed item again without a rebuild. The key stays out of the input hash, so switching it on or off never rebuilds the database.
+
+### pdv seed verify opens every seeded file with the tree's current code
+
+An import tests only the files that arrive through an import. A user's file sits in the database at the schema of the version that wrote it, and the next version migrates it when someone opens it. To test that case, seed on the release tree users run, switch the worktree to the branch, restart the backend, and run `pdv seed verify`. The profile and its input hash do not change with the branch, so `pdv run` keeps the database, and the backend applies the branch's database migrations on start.
+
+For every file id that `pdv_seed_file` records, from bundles and generators alike, verify calls `app.binfile.common/get-file` with `:read-only? true` in a read-only transaction that rolls back, then `app.common.files.validate/validate-file-schema!` on the result, because a read does not check a file that needs no migration. A read-only read migrates in memory and runs the same data check a migration ends with, but writes nothing, so each file keeps its `revn` and its recorded migrations and a second run tests the same stored state. Verify prints one row per file (project, file name, verdict, and the schema paths of a failure) and exits 3 when any file fails.
 
 ### The backend window carries the database and the bucket
 

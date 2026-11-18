@@ -785,10 +785,10 @@ seed_after_start() {
 cmd_seed() {
   local name="${REST[0]:-}"
   [ "${#REST[@]}" -le 1 ] || svc_usage "seed: takes at most one profile name"
-  if [ "$name" = "status" ]; then
-    cmd_seed_status
-    return $?
-  fi
+  case "$name" in
+    status) cmd_seed_status; return $? ;;
+    verify) cmd_seed_verify; return $? ;;
+  esac
   manage_load
   resolve_cap
   if [ "${#REST[@]}" -eq 1 ]; then
@@ -811,6 +811,28 @@ cmd_seed() {
     0) ;;
     3) exit 3 ;;
     *) exit 1 ;;
+  esac
+}
+
+# pdv seed verify [--ws N]: open every file pdv_seed_file records with the
+# tree's current code, migrating in memory, and check it against the schema.
+# Exits 3 when a file fails. Nothing is written, so a second run tests the
+# same stored state.
+cmd_seed_verify() {
+  manage_load
+  seed_resolve_selection
+  container_running "$CTR" || die "seed verify: $CTR is not running; bring it up with: pdv run --ws $WS_INDEX"
+  $SEED_ENABLED || die "seed verify: $PDV_DB is the shared database, which pdv never seeds"
+  [ "$(seed_live_backend_db)" = "$PDV_DB" ] \
+    || die "seed verify: no backend of $CTR runs on $PDV_DB; start it with: pdv start --services backend --ws $WS_INDEX"
+  seed_stage_reset || die "seed verify: could not stage the driver"
+  seed_wait_backend || die "seed verify: the backend is not ready"
+  say "seed verify: opening every seeded file in $PDV_DB"
+  local rc=0
+  seed_driver verify >/dev/null || rc=$?
+  case "$rc" in
+    0|3) exit "$rc" ;;
+    *) die "seed verify: the driver failed (see its message above)" ;;
   esac
 }
 

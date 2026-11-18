@@ -6,7 +6,8 @@
 ;;
 ;; stdout carries the protocol, stderr carries human text. Exit 0 on success,
 ;; 1 on a refused profile (or a refused flag), 2 on an internal error, and 3
-;; when a keep_going seed finished with failed items.
+;; when a keep_going seed finished with failed items or verify found a file
+;; that fails to open.
 ;;
 ;; The staging root is /tmp/pdv-seed, and PDV_SEED_DIR relocates it for testing.
 
@@ -1067,6 +1068,30 @@
         (flush))
       (finally (nrepl-close! conn)))))
 
+(defn- cmd-verify []
+  (let [conn (nrepl-connect)
+        failed (try
+                 (load-engine! conn)
+                 (let [rows (nrepl-value (nrepl-eval conn (list 'pdv.seed/verify)) "verifying the seeded files")]
+                   (when-not (sequential? rows)
+                     (die 2 "verify returned %s instead of a list" (pr-str (type rows))))
+                   (println (pr-str rows))
+                   (flush)
+                   (print-table ["PROJECT" "FILE" "VERDICT" "ERROR"]
+                                (map (fn [{:keys [project name file-id verdict error]}]
+                                       [(or project "-")
+                                        (or name file-id "-")
+                                        (clojure.core/name (or verdict :unknown))
+                                        (if error (error-cell error) "-")])
+                                     rows))
+                   (let [failed (count (filter #(= :failed (:verdict %)) rows))]
+                     (say "verified %s seeded file(s): %s passed, %s failed"
+                          (count rows) (- (count rows) failed) failed)
+                     failed))
+                 (finally (nrepl-close! conn)))]
+    (when (pos? failed)
+      (System/exit 3))))
+
 (defn- cmd-export [opts]
   (let [team (get opts "team")
         project (get opts "project")
@@ -1098,6 +1123,7 @@
     (println "  apply --slug S --hash H [--database D] [--profile NAME]")
     (println "                                           seed the running backend")
     (println "  status                                  print what the backend holds")
+    (println "  verify                                  open every seeded file, one verdict each")
     (println "  export --team T --project P --out FILE   export a project as one bundle")
     (flush))
   (System/exit code))
@@ -1128,6 +1154,7 @@
       "hash" (do (no-args! rest) (cmd-hash))
       "apply" (cmd-apply (parse-opts rest #{"slug" "hash" "database" "profile"}))
       "status" (do (no-args! rest) (cmd-status))
+      "verify" (do (no-args! rest) (cmd-verify))
       "export" (cmd-export (parse-opts rest #{"team" "project" "out"}))
       (usage 1))))
 
