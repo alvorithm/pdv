@@ -101,19 +101,21 @@ When the container exits during a start, pdv reads the log and prints the diagno
 ## Everyday commands
 
 ```sh
-pdv status                      # every instance, with its state, window set, and warnings
+pdv status                      # every instance, with its state, frontend bundle, window set, and warnings
 pdv status --ws 2               # one instance; a crashed one prints its state and a log tail
 pdv seed                        # rebuild this instance's database from its profile
 pdv seed status --ws 2          # the profile, hash, seeded-at, schema head, and files
-pdv stop --watchers             # stop the three watcher windows, keep the instance
-pdv start --watchers            # start them again in the same windows
+pdv stop --watchers             # backend-only work: stop the three watchers, check the bundle, keep the backend up
+pdv stop --watchers --build     # the same, and build the frontend release bundle without asking
+pdv start --watchers            # back to watching, in the same windows; the first compile takes about 30 s
+pdv build-frontend              # build the frontend release bundle, then repair config.js and the permissions
 pdv restart --services backend  # restart the backend process in its window and wait for it
 pdv stop                        # stop the instance, through manage.sh stop-devenv; also removes a container already stopped
 pdv attach                      # tmux inside the instance
 pdv logs                        # follow the container log
 ```
 
-`start` and `stop` with a selector act on windows, and `start` leaves a window that is already running alone. `stop` without a selector is the instance stop. No pdv verb attaches to a container to report a failure: a failed start reports the container's state and the last log lines, and a tmux session that does not appear within 120 seconds reports the last 40. `pdv status` also warns about a bind that a rename or a repointed slot has left behind, a stale compose label, and every pane of a pdv window that runs nothing.
+`start` and `stop` with a selector act on windows, and `start` leaves a window that is already running alone. `stop` without a selector is the instance stop. With the watchers stopped the UI serves the bundle on disk, so `stop --watchers` says what that bundle is and offers the release build on a terminal when it is not current. No pdv verb attaches to a container to report a failure: a failed start reports the container's state and the last log lines, and a tmux session that does not appear within 120 seconds reports the last 40. `pdv status` also warns about a bind that a rename or a repointed slot has left behind, a stale compose label, and every pane of a pdv window that runs nothing.
 
 ## Develop against a running instance
 
@@ -128,6 +130,7 @@ pdv eval --target backend --file backend/src/app/rpc/commands/files.clj   # hot-
 pdv repl                                         # cider-nrepl bridged to host port 6064 + 10000·N
 pdv lsp                                          # clojure-lsp inside the instance, as an editor's server binary
 pdv jobs 20                                      # the newest rows of the instance's job table
+pdv bug-report                                   # the checklist to paste to whoever reports a devenv bug
 ```
 
 `pdv testjvm help` and `pdv eval --help` list the subcommands, flags, and exit codes. [The manual](docs/manual-pdv.md#the-development-tools-act-on-the-instance-that-serves-your-worktree) explains the lock, the reload, and when the test JVM needs a restart.
@@ -154,6 +157,7 @@ pdv tune                        # post-start fixes (config.js, clojure-lsp, skil
 | `pdv testjvm run` or `pdv eval` exits 5 with `restart needed`                         | `pdv testjvm restart`, because the classpath, a reload-exempt namespace, or pdv's harness changed      |
 | `pdv testjvm` or `pdv eval` exits 3 and lists the running instances                   | run it from the worktree an instance serves, or pass `--ws N`                                          |
 | a backend change does not take effect and a reload cannot reach it                    | `pdv restart --services backend`                                                                       |
+| a red "Reconnecting..." overlay, or old frontend code, with the watchers stopped      | `pdv build-frontend`, or `pdv start --watchers` to watch again                                         |
 
 ## The manual and the harness carry the detail
 

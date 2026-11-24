@@ -36,8 +36,9 @@ Usage: pdv <command> [options]
 
 Every verb accepts --ws N anywhere in its arguments to select the instance,
 and --repo PATH to name the checkout. Without --ws, testjvm, eval, repl,
-lsp, and jobs act on the running instance that serves the worktree you call
-from (exit 3 when none does); every other verb acts on ws0.
+lsp, jobs, build-frontend, and bug-report act on the running instance that
+serves the worktree you call from (exit 3 when none does, except
+bug-report, which then prints placeholders); every other verb acts on ws0.
 
 Instances
   run     [--services LIST] [--only-backend] [--clean] [--recreate]
@@ -48,16 +49,22 @@ Instances
           Bring a workspace up with the requested service windows.
   start   [--services LIST | --watchers] [--java-opts OPTS] [--clean]
           Start windows of a running instance (or restart stopped ones).
-          A window already running is left alone.
+          A window already running is left alone. With --watchers, also
+          says when the first compile lands and how to go backend-only.
   restart --services LIST | --watchers  [--java-opts OPTS] [--clean]
           Stop, then start the named windows of a running instance; waits
           for the backend's nREPL when backend is among them.
-  stop    [--services LIST | --watchers] | [--all]
+  stop    [--services LIST | --watchers [--build | --no-build]] | [--all]
           Stop service windows of a running instance; without a selector,
-          stop the instance itself.
+          stop the instance itself. --watchers is backend-only work: it
+          reports what the UI serves, offers a release build on a terminal
+          when the bundle is not current (--build and --no-build decide
+          without asking), makes sure the backend runs, and prints the
+          ways back.
   attach  Attach to the instance's tmux session.
-  status  Every instance with its state, ports, tree, and window set; a
-          broken instance gets its state and a logs tail, never an attach.
+  status  Every instance with its state, ports, tree, frontend bundle, and
+          window set; a broken instance gets its state and a logs tail,
+          never an attach.
   logs    Follow the instance's container log.
 
 Development tools (the instance that serves the caller's worktree)
@@ -73,6 +80,15 @@ Development tools (the instance that serves the caller's worktree)
   lsp     clojure-lsp inside the instance over stdio: an editor's
           language-server binary.
   jobs [count]  the instance's newest job-table rows (default 15).
+  build-frontend
+          Build the frontend release bundle (./scripts/build app, minutes)
+          with the frontend watchers stopped, then repair the permissions
+          and the config.js the build removes. The UI then works with no
+          watcher. A running watcher is refused with exit 3, or stopped
+          after asking on a terminal.
+  bug-report
+          Print the checklist to hand to whoever reports a devenv bug, with
+          the instance's container, tenant, and database filled in.
 
 Services (comma list, default: frontend,storybook,exporter,backend,
           plus mcp,serena with --agentic)
@@ -498,6 +514,7 @@ cmd_start() {
   fi
   has_session || die "start: $CTR has no tmux session '$SESSION' — bring it up with: pdv run --ws $WS_INDEX"
   start_selected
+  if selection_is_watchers; then watchers_started; fi
 }
 
 # ---------------------------------------------------------------- restart
@@ -533,14 +550,20 @@ cmd_restart() {
 
 # ------------------------------------------------------------------- stop
 cmd_stop() {
-  local selector=false all=false a
+  local selector=false all=false build="" a
   for a in "$@"; do
     case "$a" in
       --services|--services=*|--watchers) selector=true ;;
       --all) all=true ;;
+      --build|--no-build)
+        if [ -n "$build" ] && [ "$build" != "$a" ]; then
+          svc_usage "stop: --build and --no-build exclude each other"
+        fi
+        build="$a" ;;
     esac
   done
   if ! $selector; then
+    [ -z "$build" ] || svc_usage "stop: $build goes with --watchers"
     # No selector is the instance stop. --all and --ws are mutually exclusive
     # in manage.sh, and silently dropping one of them would stop more than the
     # caller asked for.
@@ -560,14 +583,33 @@ cmd_stop() {
     exec "$ROOT/manage.sh" stop-devenv --ws "$WS_INDEX"
   fi
   take_service_flags "$@"
-  [ "${#REST[@]}" -eq 0 ] || svc_usage "stop: unexpected argument '${REST[0]}'"
-  manage_load
+  local -a rest=()
+  for a in ${REST[@]+"${REST[@]}"}; do
+    case "$a" in --build|--no-build) ;; *) rest+=("$a") ;; esac
+  done
+  [ "${#rest[@]}" -eq 0 ] || svc_usage "stop: unexpected argument '${rest[0]}'"
   load_selection
+  if [ -n "$build" ] && ! selection_is_watchers; then
+    svc_usage "stop: $build goes with --watchers"
+  fi
+  manage_load
   if ! container_running "$CTR"; then
     die "stop: $CTR is not running"
   fi
   local svc
+  if selection_is_watchers; then
+    say "backend-only work: the watchers stop, and a frontend change then reaches the UI only through a release build"
+    why "the shadow-cljs JVM and the node watchers hold 5 to 10 GiB, and backend, common, and REPL work needs none of it"
+    imp "keep the watchers while iterating on the UI or showing it to somebody"
+  fi
   for svc in ${SELECTED[@]+"${SELECTED[@]}"}; do stop_service "$svc"; done
+  if selection_is_watchers; then
+    case "$build" in
+      --build)    watchers_stopped force ;;
+      --no-build) watchers_stopped skip ;;
+      *)          watchers_stopped auto ;;
+    esac
+  fi
 }
 
 # ---------------------------------------------------------------- status
@@ -613,6 +655,7 @@ status_instance() {
   if [ -n "$served" ] && [ -d "$served" ]; then
     branch=$(git -C "$served" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
     sub "branch:  $branch"
+    sub "bundle:  $(bundle_state_text "$(frontend_bundle_state "$served")")"
   fi
   seed_instance_line "$served"
   if [ "$running" != "true" ]; then
@@ -727,6 +770,8 @@ main() {
     repl)           cmd_repl ;;
     lsp)            cmd_lsp ;;
     jobs)           cmd_jobs ;;
+    build-frontend) cmd_build_frontend ;;
+    bug-report)     cmd_bug_report ;;
     *)              manage_load; exec "$ROOT/manage.sh" ${original[@]+"${original[@]}"} ;;
   esac
 }

@@ -95,6 +95,12 @@ pdv today: the agentic frontend enables MCP only through `frontend/resources/pub
 
 In Penpot: the devenv generates the file from `PENPOT_FLAGS` at start, as `docker/images/files/nginx-entrypoint.sh` already does for the production images, and the agentic pre-flight in `manage.sh` goes away. pdv then drops the snapshot and its variable.
 
+### A release build keeps the tree writable for the host
+
+pdv today: `frontend/scripts/build` deletes `resources/public` and recreates it, with `public/js`, as the container user. Under rootless Docker the host user is `other` on both, so the host can no longer write `config.js` there. `pdv build-frontend` runs `chmod o+w` on both directories inside the container after the build, and restores `config.js` through the tune (`lib/pdv-services.sh::frontend_build`).
+
+In Penpot: the build removes only the files it generates under `resources/public` and leaves the directories and `config.js` in place, so both directories keep their owner, mode, and ACL. pdv then drops the chmod and the `config.js` restore after a build.
+
 ### The admin-console is off in the devenv
 
 pdv today: the backend turns the admin-console (Nitrate) module on by default, and no devenv runs the service, so every profile read fails with "nitrate is unreachable". pdv starts the backend with `disable-admin-console` prepended to `PENPOT_FLAGS` (`lib/pdv-services.sh::backend_prefix`), and a `config.js` it generates carries the same flag for a frontend that predates penpot#13061.

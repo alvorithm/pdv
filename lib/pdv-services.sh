@@ -280,6 +280,7 @@ TAIL
 # Start one window's panes on a running instance: create the window when it is
 # absent, then type the service command into each idle pane. A busy pane is
 # reported and left alone, so this is also the cheap "what is running?".
+# STARTED_ANY turns true when a command was typed into a pane.
 # A pane spends its first seconds inside the image's bashrc (emsdk_env.sh and
 # the pnpm PATH setup), and that child is startup work rather than a service.
 # Read pane_busy only after the shell settles, or a just-created window is
@@ -313,6 +314,8 @@ ensure_node_deps() {
   as_penpot "cd ~/penpot/$dir && ./scripts/setup" \
     || warn "$dir setup failed; the window's command will probably fail with a missing dependency"
 }
+
+STARTED_ANY=false
 
 start_service() {
   local svc="$1" win cmd pane pid desc i=0 next fresh window_fresh=false
@@ -352,6 +355,7 @@ start_service() {
     else
       say "window '$win' pane $i: starting $cmd"
       tmx send-keys -t "$pane" "$cmd" Enter
+      STARTED_ANY=true
     fi
     i=$(( i + 1 ))
   done
@@ -417,4 +421,157 @@ status_idle_panes() {
   if $frontend && [ -n "$tree" ] && [ ! -f "$tree/frontend/resources/public/js/main.js" ]; then
     subwarn "no frontend bundle on disk: the UI is a blank page until the watcher's first compile lands"
   fi
+}
+
+# ------------------------------------------------------------ the bundle
+# What the UI serves when no frontend watcher runs: the bundle under
+# frontend/resources/public/js, judged from the host tree. Prints `none` (no
+# main.js), `dev` (a watcher's build, which leaves cljs-runtime/ beside
+# main.js), `stale <path>` (a source file newer than main.js), or `current`.
+# Read-only, so `pdv status` reports it for every instance.
+frontend_bundle_state() {
+  local tree="$1" js="$1/frontend/resources/public/js" newer
+  if [ ! -f "$js/main.js" ]; then echo none; return 0; fi
+  if [ -d "$js/cljs-runtime" ]; then echo dev; return 0; fi
+  newer=$(find "$tree/frontend/src" "$tree/frontend/resources/styles" "$tree/frontend/translations" \
+            "$tree/common/src" -type f -newer "$js/main.js" -print -quit 2>/dev/null || true)
+  if [ -n "$newer" ]; then echo "stale ${newer#"$tree"/}"; else echo current; fi
+}
+
+bundle_state_text() {
+  case "$1" in
+    none)     echo "no bundle on disk, so the page is blank" ;;
+    dev)      echo "a watcher's dev build, which shows a red 'Reconnecting...' overlay while no frontend watcher runs" ;;
+    stale\ *) echo "a release bundle older than ${1#stale }" ;;
+    current)  echo "a current release bundle" ;;
+  esac
+}
+
+# ------------------------------------------------------ the watcher modes
+# `pdv stop --watchers` is backend-only work: the shadow-cljs JVM and the node
+# watchers hold 5 to 10 GiB, and the backend, common, and REPL work needs none
+# of it. What it costs is live frontend recompilation, so the UI then serves
+# the bundle on disk. These follow-ups tell the developer what that bundle is,
+# offer the build that makes it current, keep the backend up, and print the
+# way back. `pdv start --watchers` is the way back.
+selection_is_watchers() {
+  [ "${SELECTED[*]-}" = "${PDV_WATCHERS[*]}" ]
+}
+
+ui_url() { printf 'https://localhost:%s' "$(( 3449 + WS_INDEX * 10000 ))"; }
+
+# $1: auto (ask on a tty when the bundle is not current), force, or skip.
+watchers_stopped() {
+  local policy="$1" tree state build=false ans
+  tree=$(mount_src "$CTR")
+  state=$(frontend_bundle_state "$tree")
+  say "bundle: $(bundle_state_text "$state")"
+  why "with no watcher, the UI serves the bundle under frontend/resources/public/js; a stale or dev bundle hides every frontend change made since it was built"
+  if [ "$policy" = force ]; then
+    build=true
+  elif [ "$state" != current ]; then
+    if [ "$policy" = skip ]; then
+      vsay "bundle: not building, as --no-build asks"
+    elif [ -t 0 ]; then
+      read -r -p "[pdv] run ./scripts/build app now (minutes; wipes node_modules and resources/public)? [y/N] " ans
+      if [ "${ans,,}" = y ]; then build=true; fi
+    else
+      warn "no terminal to ask on, so nothing was built; build with: pdv build-frontend --ws $WS_INDEX"
+    fi
+  fi
+  if $build; then
+    frontend_build || warn "the UI serves whatever the failed build left; retry with: pdv build-frontend --ws $WS_INDEX"
+  fi
+  ensure_backend_up || true
+  say "done: $CTR runs without frontend watchers"
+  sub "UI now:           $(ui_url)  ($(bundle_state_text "$(frontend_bundle_state "$tree")"))"
+  sub "frontend change:  pdv build-frontend --ws $WS_INDEX (minutes), or pdv start --watchers --ws $WS_INDEX (about 30 s to compile)"
+  sub "backend restart:  pdv restart --services backend --ws $WS_INDEX"
+  sub "REPL for editors: pdv repl --ws $WS_INDEX (host port $(( 6064 + WS_INDEX * 10000 )))"
+}
+
+watchers_started() {
+  if ! $STARTED_ANY; then
+    say "done: nothing to start, the watchers were already running"
+    return 0
+  fi
+  say "done: started the panes marked 'starting' above; the first compile takes about 30 s"
+  why "until that compile lands, the UI serves whatever bundle is on disk, so a reload before then shows the old code"
+  imp "the compile replaces a release bundle with a dev build, so a later pdv stop --watchers offers the build again"
+  sub "watch progress:   pdv attach --ws $WS_INDEX (window '$(service_window frontend)')"
+  sub "UI:               $(ui_url) (hard-reload once the compile lands)"
+  sub "backend only:     pdv stop --watchers --ws $WS_INDEX"
+}
+
+# The backend's uREPL on 6062 opens when the JVM is up, so an answering
+# connect is the liveness signal. A running backend is left untouched, and so
+# is a busy pane whose port is still closed, which is a backend still starting.
+UREPL_PORT=6062
+ensure_backend_up() {
+  local pid desc deadline
+  if repl_up "$UREPL_PORT"; then
+    say "backend is up (uREPL :$UREPL_PORT answering)"
+    return 0
+  fi
+  pid=$(tmx list-panes -t "$SESSION:$(service_window backend)" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
+  if [ -n "$pid" ] && desc=$(pane_busy "$pid"); then
+    warn "the backend pane runs '$(printf '%.60s' "$desc")' but uREPL :$UREPL_PORT is closed; it is probably still starting, so pdv leaves it alone"
+    return 0
+  fi
+  say "backend: not running, starting it"
+  why "backend-only work still needs the backend JVM"
+  seed_resolve_selection
+  start_service backend || return 1
+  say "waiting for uREPL :$UREPL_PORT in $CTR (≤300 s)"
+  deadline=$(( SECONDS + 300 ))
+  until repl_up "$UREPL_PORT"; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      warn "the backend did not open uREPL :$UREPL_PORT within 300 s; inspect it with: pdv attach --ws $WS_INDEX"
+      return 1
+    fi
+    sleep 3
+  done
+  say "backend is up (uREPL :$UREPL_PORT answering)"
+}
+
+# The release build. `./scripts/build app` deletes frontend/node_modules and
+# frontend/resources/public before it rebuilds them (and the mcp and plugins
+# node_modules too), so it refuses to run while a frontend or storybook
+# watcher does. The config.js snapshot is refreshed first, so the repair
+# restores the file the developer had.
+frontend_build() {
+  local rc=0 busy
+  busy=$(busy_frontend_watchers)
+  if [ -n "$busy" ]; then
+    warn "build: not building while a watcher runs (services: $busy); stop it with: pdv stop --watchers --ws $WS_INDEX"
+    return 3
+  fi
+  tune_config_js
+  say "build: ./scripts/build app in $CTR, as penpot (takes minutes)"
+  why "a release build carries no shadow-cljs devtools client, so the UI works with no watcher and without the 'Reconnecting...' overlay"
+  imp "it wipes frontend/node_modules and frontend/resources/public first; the repairs follow it, and open tabs need a hard reload afterwards"
+  as_penpot "cd ~/penpot/frontend && ./scripts/build app" || rc=$?
+  say "build repair 1/2: chmod o+w frontend/resources/public and public/js, in the container, as their owner"
+  why "the build recreates both as the container user; under rootless Docker the host user is 'other' there, and pdv run --agentic writes config.js into public/js from the host"
+  as_penpot "chmod o+w $DEST/frontend/resources/public $DEST/frontend/resources/public/js" \
+    || warn "build repair: chmod failed, so the host cannot write into frontend/resources/public/js"
+  say "build repair 2/2: config.js"
+  why "the build deleted resources/public whole, and config.js is gitignored, so nothing else brings it back"
+  tune_config_js
+  if [ "$rc" -ne 0 ]; then
+    warn "build: ./scripts/build app failed (exit $rc)"
+    return 1
+  fi
+  say "build: done"
+}
+
+# The services among frontend and storybook whose window has a busy pane,
+# space-separated. Both read and write frontend/node_modules.
+busy_frontend_watchers() {
+  local svc pid out=()
+  for svc in frontend storybook; do
+    pid=$(tmx list-panes -t "$SESSION:$(service_window "$svc")" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
+    if [ -n "$pid" ] && pane_busy "$pid" >/dev/null; then out+=("$svc"); fi
+  done
+  printf '%s' "${out[*]-}"
 }

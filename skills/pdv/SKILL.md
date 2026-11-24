@@ -1,6 +1,6 @@
 ---
 name: pdv
-description: Work in a Penpot development instance that pdv runs. Covers finding or giving a worktree its own instance, pointing an instance at another worktree, recovering a container that exits at start, running a command inside the container, running backend tests (a focused run in the persistent test JVM or a cold CI-style suite), evaluating Clojure, restarting the backend, connecting an editor's REPL and language server, logging in for a UI check, and running the Playwright suite. Use when a task needs a running Penpot or its backend JVM and `pdv help` does not say how, and before removing or recreating a devenv container.
+description: Work in a Penpot development instance that pdv runs. Covers finding or giving a worktree its own instance, pointing an instance at another worktree, recovering a container that exits at start, running a command inside the container, running backend tests (a focused run in the persistent test JVM or a cold CI-style suite), evaluating Clojure, restarting the backend, slimming an instance to backend-only work, building the frontend release bundle, connecting an editor's REPL and language server, logging in for a UI check, running the Playwright suite, and filing a devenv bug. Use when a task needs a running Penpot or its backend JVM and `pdv help` does not say how, and before removing or recreating a devenv container.
 ---
 
 # Working in a Penpot instance that pdv runs
@@ -84,6 +84,25 @@ pdv restart --services backend
 
 Run it from the worktree's instance, adding `--ws N` for any slot other than ws0, because `restart` defaults to ws0 like `start` and `stop`. The verb stops the backend window's process, starts it again with the worktree's database and heap, and returns once the new process answers on its nREPL. Never call `(app.main/restart)`: the in-JVM refresh can leave graph sync, websocket notifications, and realtime collaboration dead until a process restart.
 
+## Slim an instance to backend-only work
+
+The frontend watchers hold 5 to 10 GiB, and backend, common, and REPL work needs none of it:
+
+```sh
+pdv stop --watchers --ws N             # add --build to refresh the UI bundle, --no-build to never build
+pdv start --watchers --ws N            # back to watching; the first compile takes about 30 s
+```
+
+The stop keeps the backend running and starts it when it is down. Afterwards the UI serves the bundle on disk, so a frontend edit reaches the browser only through a release build or a restarted watcher. The stop's last lines say what the UI serves now. Never slim an instance another session is using for UI work, and never stop the watchers to save memory while a task needs the UI.
+
+## Build the frontend release bundle
+
+```sh
+pdv build-frontend --ws N
+```
+
+The build takes minutes and wipes `frontend/node_modules` and `frontend/resources/public`, so it never runs beside a frontend or Storybook watcher. Without a terminal to confirm on, it exits 3 and builds nothing. Stop the watchers first with `pdv stop --watchers --ws N --build`, which builds in the same step. The verb restores `config.js` and the write access the build removes. Hard-reload open tabs afterwards. A red "Reconnecting..." overlay means the UI serves a watcher's dev build with no watcher behind it, and this build is the fix when the watchers stay stopped.
+
 ## Connect an editor
 
 - **REPL.** `pdv repl` starts cider-nrepl inside the backend and bridges it to host port `6064 + 10000 × N`, writing that port to the worktree's `.nrepl-port`. It runs in the foreground, needs `python3` on the host, and replaces an older bridge on the same port. Connect the editor's nREPL client to `127.0.0.1` and that port. A backend restart takes the cider server down, so run `pdv repl` again afterwards.
@@ -108,3 +127,11 @@ From `frontend/` inside the container, run `CI=true pnpm exec playwright test --
 ## Check whether background work arrived
 
 `pdv jobs` lists the instance's newest job-table rows. A save that seems to vanish leaves a `process-webhook-event` row that reaches `completed` seconds later, and a failed job carries its error there.
+
+## File a devenv bug
+
+```sh
+pdv bug-report --ws N
+```
+
+The verb prints an eight-item checklist with the instance's container, tenant, and database filled in. Paste it to whoever reports the bug, or follow it yourself. Items 4, 5, and 6 (the browser console's websocket frames, the backend pane, and the job table) usually settle a report. Without a running instance the checklist carries placeholders and still exits 0.

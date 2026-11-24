@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pdv-tools.sh — the developer tools on a running instance: the persistent
 # test JVM, Clojure evaluation, the editor REPL bridge and language server,
-# and the job table.
+# the job table, the frontend release build, and the bug-report checklist.
 #
 # Sourced by pdv after pdv-core.sh, pdv-services.sh and pdv-seed.sh. The
 # in-container halves live in share/ (testjvm.clj, testjvm-log4j2.xml,
@@ -10,13 +10,14 @@
 # the REPL bridge is lib/repl-bridge.py.
 
 # --------------------------------------------------------- caller's instance
-# testjvm, eval, repl, lsp and jobs act on the instance that serves the
-# caller's worktree: `--ws N` names one, else the running instance whose
-# bind mount resolves to the git toplevel of the directory pdv was called
-# from (CALLER_DIR, captured before pdv changes directory). One `docker
-# inspect` covers every name manage.sh can create. Sets CTR, WS, WS_INDEX,
-# HOST_ROOT and WS_FLAG and prints the banner; returns 3 when no running
-# instance qualifies, after naming the ones that run and what each serves.
+# testjvm, eval, repl, lsp, jobs, build-frontend and bug-report act on the
+# instance that serves the caller's worktree: `--ws N` names one, else the
+# running instance whose bind mount resolves to the git toplevel of the
+# directory pdv was called from (CALLER_DIR, captured before pdv changes
+# directory). One `docker inspect` covers every name manage.sh can create.
+# Sets CTR, WS, WS_INDEX, HOST_ROOT and WS_FLAG and prints the banner;
+# returns 3 when no running instance qualifies, after naming the ones that
+# run and what each serves.
 select_caller_instance() {
   local want="" name running src list="" i
   local -a names=()
@@ -661,7 +662,7 @@ cmd_lsp() {
 # reading pane logs. The table lives in the database the backend uses, and
 # the instance's tenant (PENPOT_TENANT, devenv-wsN) filters it.
 cmd_jobs() {
-  local n=15 a db tenant
+  local n=15 a
   for a in ${REST[@]+"${REST[@]}"}; do
     case "$a" in
       ''|*[!0-9]*) echo "usage: pdv jobs [count] (default 15)" >&2; exit 2 ;;
@@ -670,21 +671,124 @@ cmd_jobs() {
   done
   select_caller_instance || exit 3
   manage_load
-  db=$(seed_live_backend_db)
-  if [ -z "$db" ]; then
-    db=$(seed_state_read "$(readlink -f "$HOST_ROOT")" pdv-db)
-    [ -n "$db" ] || db=$(seed_db_for_tree "$(readlink -f "$HOST_ROOT")")
-  fi
-  tenant=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CTR" 2>/dev/null \
-             | sed -n 's/^PENPOT_TENANT=//p' | head -1)
-  tenant="${tenant:-devenv-$WS}"
-  say "jobs for $tenant in $db, newest first (last $n)"
+  instance_job_target
+  say "jobs for $JOB_TENANT in $JOB_DB, newest first (last $n)"
   why "the database is the one the backend uses, and the tenant names this instance's rows"
   seed_pg_container >/dev/null || die "jobs: the shared postgres container is not running"
-  seed_psql "$db" -P tuples_only=off -P format=aligned -P footer=off -c "
+  seed_psql "$JOB_DB" -P tuples_only=off -P format=aligned -P footer=off -c "
       SELECT to_char(created_at, 'HH24:MI:SS') AS at, name, status,
              left(coalesce(error::text, ''), 60) AS error
-      FROM job WHERE tenant = '$tenant'
+      FROM job WHERE tenant = '$JOB_TENANT'
       ORDER BY created_at DESC LIMIT $n" \
     || die "jobs: the query failed; the job table's schema may have moved upstream"
+}
+
+# The database and tenant of the selected instance's job rows: the database
+# the live backend uses, else the worktree's remembered one, else
+# pdvwt_<slug>, and the container's PENPOT_TENANT. Sets JOB_DB and JOB_TENANT.
+instance_job_target() {
+  local tree
+  tree=$(readlink -f "$HOST_ROOT")
+  JOB_DB=$(seed_live_backend_db)
+  if [ -z "$JOB_DB" ]; then
+    JOB_DB=$(seed_state_read "$tree" pdv-db)
+    [ -n "$JOB_DB" ] || JOB_DB=$(seed_db_for_tree "$tree")
+  fi
+  JOB_TENANT=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CTR" 2>/dev/null \
+                 | sed -n 's/^PENPOT_TENANT=//p' | head -1)
+  JOB_TENANT="${JOB_TENANT:-devenv-$WS}"
+}
+
+# ---------------------------------------------------------- build-frontend
+# The release build for a UI that runs with no watcher (see the watcher modes
+# in lib/pdv-services.sh). The build wipes frontend/node_modules and
+# resources/public, which a live watcher reads and writes, so a running
+# frontend or storybook watcher is refused with exit 3, or stopped after a
+# confirmation on a terminal. frontend_build checks again, so a watcher that
+# survived the stop also blocks the build.
+cmd_build_frontend() {
+  [ "${#REST[@]}" -eq 0 ] || svc_usage "build-frontend: unexpected argument '${REST[0]}' (build-frontend takes only --ws N)"
+  select_caller_instance || exit 3
+  local svc ans
+  local -a busy=()
+  read -ra busy <<<"$(busy_frontend_watchers)"
+  if [ "${#busy[@]}" -gt 0 ]; then
+    say "build-frontend: a watcher runs in $CTR (services: ${busy[*]})"
+    why "the build wipes frontend/node_modules and frontend/resources/public, which a live watcher reads and writes"
+    if [ ! -t 0 ]; then
+      warn "build-frontend: nothing built; stop the watchers first with: pdv stop --watchers --ws $WS_INDEX --build"
+      exit 3
+    fi
+    read -r -p "[pdv] stop those watchers and build? [y/N] " ans
+    if [ "${ans,,}" != y ]; then
+      warn "build-frontend: nothing built; the watchers keep running"
+      exit 3
+    fi
+    say "build-frontend: stopping the ${busy[*]} watcher windows before the build"
+    for svc in "${busy[@]}"; do stop_service "$svc"; done
+  fi
+  local rc=0
+  frontend_build || rc=$?
+  [ "$rc" -eq 0 ] || exit "$rc"
+  say "UI now: $(ui_url)  ($(bundle_state_text "$(frontend_bundle_state "$HOST_ROOT")"); hard-reload open tabs)"
+  sub "next frontend change: pdv build-frontend --ws $WS_INDEX, or back to watching: pdv start --watchers --ws $WS_INDEX"
+}
+
+# -------------------------------------------------------------- bug-report
+# The checklist to hand to whoever reports a devenv bug. Items 4, 5, and 6
+# usually settle it: a websocket-level frontend exception shows the failing
+# frame, a backend exception shows the stacktrace, and the job table says
+# whether the work arrived. Best effort, because a checklist is most needed
+# when the instance is down: with no instance to name, the template carries
+# placeholders, and every command in it is portable to any checkout with pdv
+# installed. The postgres container name is fixed by manage.sh's compose
+# project, penpotdev-infra.
+cmd_bug_report() {
+  [ "${#REST[@]}" -eq 0 ] || svc_usage "bug-report: unexpected argument '${REST[0]}' (bug-report takes only --ws N)"
+  local ctr="penpot-devenv-wsN-main" tenant="devenv-wsN" db="pdvwt_<worktree slug>" ws="N"
+  if select_caller_instance 2>/dev/null; then
+    instance_job_target
+    ctr=$CTR tenant=$JOB_TENANT db=$JOB_DB ws=$WS_INDEX
+  elif $WS_GIVEN; then
+    ctr=$CTR tenant="devenv-$WS" ws=$WS_INDEX
+    say "$CTR is not running; its database is a placeholder"
+  else
+    say "no running instance serves this worktree; the checklist carries placeholders"
+  fi
+  say "checklist for a devenv bug report: paste it to the reporter; items 4, 5, and 6 usually settle it"
+  cat <<EOF
+
+  1. CODE AND INSTANCE, in the checkout the bug ran on:
+       git status -sb && git rev-parse HEAD
+     when the instance was last started or refreshed, and all the output of:
+       pdv status --ws ${ws}
+  2. EXACT STEPS: the file (name and id), new or existing, branched or
+     not, which shape type was edited, one editor or several, and what
+     "save" meant for them: autosave, Ctrl+S, page switch, tab close.
+  3. THE VISIBLE ERROR: screenshot of the toast, with its text.
+  4. DEVTOOLS CONSOLE at the moment of failure. Saves go over the
+     websocket, so a Network-tab capture may show nothing: right-click
+     the \`ws\` connection, open Messages, capture the frames around
+     the failure.
+  5. BACKEND PANE, around the failure timestamp:
+       docker exec -u penpot ${ctr} tmux capture-pane -p -t penpot:backend -S -400
+     Exceptions print as E lines with a SUMMARY/DETAIL stacktrace.
+  6. WHEN A SAVE SEEMS TO VANISH, or the pane looks quiet, the job table:
+       pdv jobs --ws ${ws}
+     or, without pdv:
+       docker exec penpotdev-infra-postgres-1 psql -U penpot -d ${db} -At -c \\
+         "SELECT name, status, to_char(created_at,'HH24:MI:SS') FROM job \\
+          WHERE tenant='${tenant}' ORDER BY created_at DESC LIMIT 10"
+     A save leaves a process-webhook-event row that reaches completed
+     seconds later; a failed row carries its error.
+  7. TIMESTAMP with timezone, to correlate the captures above.
+  8. SCOPE: does it also fail on a brand-new file, on other files,
+     after an instance restart?
+
+  Never paste cookies or tokens; screenshots and log excerpts are fine.
+
+  Every command above runs in any Penpot checkout: the pdv lines need
+  only pdv installed (https://github.com/alvorithm/pdv), and the git,
+  docker, and psql lines need nothing else.
+EOF
 }

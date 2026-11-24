@@ -133,6 +133,30 @@ The test database is separate either way: the instance overrides the name `penpo
 
 `stop` without a selector is not a window verb. It stops the instance through `manage.sh stop-devenv`, which also stops the shared infrastructure when no other instance remains. `manage.sh` stops only running instances, so a container that stopped outside pdv (a Docker daemon restart, a host shutdown) would stay forever. pdv therefore first removes the target's main container when it exists and is not running, through `manage.sh`'s own `stop-instance`, and `--all` does the same for every devenv container on the daemon. Volumes stay.
 
+## Backend-only work stops the watchers, and the UI then serves the bundle on disk
+
+The shadow-cljs JVM and the node watchers hold 5 to 10 GiB once warm, and backend, common, and REPL work needs none of it. `pdv stop --watchers` stops the frontend, Storybook, and exporter windows and keeps the backend. The cost is live frontend recompilation: an edit under `frontend/src` no longer reaches the browser on reload, because the UI then serves the precompiled bundle under `frontend/resources/public/js`. Keep the watchers while you iterate on the UI or show it to somebody.
+
+The stop prints each pane's resident memory as it interrupts it, reports a window that was already idle, and sends a second interrupt halfway through the wait to a pane that ignores the first. It then judges the bundle from the host tree, and `pdv status` prints the same verdict on its `bundle:` line for every instance:
+
+- **No bundle.** `main.js` is missing, so the page is blank.
+- **A dev build.** A `cljs-runtime/` directory beside `main.js` marks the watcher's own output. It carries the shadow-cljs devtools client, which shows a red "Reconnecting..." overlay once the watcher is gone.
+- **A stale release bundle.** A file under `frontend/src`, `frontend/resources/styles`, `frontend/translations`, or `common/src` is newer than `main.js`.
+- **A current release bundle.** None of the above.
+
+When the bundle is not current, the stop offers the release build on a terminal and builds nothing without one. `--build` builds without asking, even a current bundle, and `--no-build` never builds. Next, the stop makes sure the backend runs: an answer on its uREPL port 6062 means the JVM is up, a busy backend pane with the port still closed is a backend that is still starting and is left alone, and an idle pane gets `./scripts/start-dev`. The stop ends with the UI address and what it serves, the two ways to get a frontend change through (`pdv build-frontend`, or `pdv start --watchers`), the backend restart command, and the editor REPL command.
+
+`pdv start --watchers` is the way back. It reports every pane that already runs something and leaves it alone, and it never sends an interrupt, so a misjudged pane costs at worst a command typed into a live watcher. When it started a watcher, it says that the first compile takes about 30 seconds, and that until it lands a reload shows the old bundle. That compile replaces a release bundle with a dev build, so the next `pdv stop --watchers` offers the build again.
+
+### build-frontend makes the release bundle current
+
+`pdv build-frontend` runs `./scripts/build app` in the container as `penpot`, which takes minutes. The build deletes `frontend/node_modules` and `frontend/resources/public` before it rebuilds them, and the `mcp` and `plugins` dependencies as well, so it never runs beside a frontend or Storybook watcher. On a terminal the verb offers to stop them and says when it does. Without a terminal, or when the offer is declined, it exits 3 and names `pdv stop --watchers --build`. A watcher that survives the stop also blocks the build. Afterwards it repairs two things the build breaks:
+
+- **Write access.** The build recreates `resources/public` and `public/js` as the container user. Under rootless Docker the host user is `other` there, so the verb runs `chmod o+w` on both inside the container, as their owner.
+- **config.js.** The build deleted it. The verb refreshes the instance's snapshot of `config.js` before the build and runs the tune's `config.js` step afterwards, which restores it (see the hygiene verbs below).
+
+The verb ends with the UI address and what it serves. Hard-reload open tabs afterwards.
+
 ## The heap cap travels in `_JAVA_OPTIONS` because two scripts reset JAVA_OPTS
 
 The default cap is `-Xmx768m -Xms50m`. pdv puts the cap in front of the `frontend`, `storybook`, `exporter`, and `backend` window commands, as both `_JAVA_OPTIONS` and `JAVA_OPTS`. Of those windows, the frontend, exporter, and backend start a Java Virtual Machine (JVM). The frontend window also carries the shadow-cljs process that compiles the storybook target.
@@ -181,7 +205,7 @@ A start waits for four things before it reports success: the container in the ru
 
 The mount source and the compose `working_dir` label are recorded when a container is created, so a worktree rename or a repointed slot symlink leaves both naming a path the bind left long ago. `pdv status` therefore asks the container for the device and inode it sees at `/home/penpot/penpot`, and matches them against the host paths the bind could have come from: the recorded source and its target, every workspace slot and its target, and every worktree of the checkout. It prints a warning with the recreate command when the recorded source no longer exists or now resolves to another tree, and a `serves:` line naming the tree the container really serves. A stale `working_dir` label gets a warning of its own, which is cosmetic, because the next `--recreate` rewrites it.
 
-Inside the tmux session, every pane of a pdv window that runs nothing gets a warning with the `pdv start --services` command that revives it. An idle pane is either a deliberate `pdv stop` or a process that died, and in both cases the UI serves whatever bundle is on disk. A frontend window with no `frontend/resources/public/js/main.js` in the tree gets a warning that the UI is a blank page until the first compile lands.
+Inside the tmux session, every pane of a pdv window that runs nothing gets a warning with the `pdv start --services` command that revives it. An idle pane is either a deliberate `pdv stop` or a process that died, and in both cases the UI serves whatever bundle is on disk. The `bundle:` line says what that bundle is: none, a watcher's dev build, a stale release bundle with the newer source it found, or a current release bundle. A frontend window with no `frontend/resources/public/js/main.js` in the tree gets a warning that the UI is a blank page until the first compile lands.
 
 ## Two hygiene verbs prepare the tree and the container
 
@@ -198,7 +222,7 @@ Inside the tmux session, every pane of a pdv window that runs nothing gets a war
 
 ## The development tools act on the instance that serves your worktree
 
-`testjvm`, `eval`, `repl`, `lsp`, and `jobs` work on a running instance. Without `--ws`, each one picks the running instance whose `/home/penpot/penpot` bind resolves to the git toplevel of the directory you call it from, so a session in a worktree reaches that worktree's instance with no flag. When no running instance serves that worktree, the verb lists every running instance with the tree it serves and exits 3. `--ws N` names an instance whatever the directory is. Every other verb keeps the ws0 default.
+`testjvm`, `eval`, `repl`, `lsp`, `jobs`, `build-frontend`, and `bug-report` work on a running instance. Without `--ws`, each one picks the running instance whose `/home/penpot/penpot` bind resolves to the git toplevel of the directory you call it from, so a session in a worktree reaches that worktree's instance with no flag. When no running instance serves that worktree, the verb lists every running instance with the tree it serves and exits 3. `bug-report` is the exception: it prints its checklist with placeholders instead. `--ws N` names an instance whatever the directory is. Every other verb keeps the ws0 default.
 
 `testjvm` and `eval` print the choice on their first line, in the form `[pdv] instance: penpot-devenv-ws2-main  (worktree: <host path>)`.
 
@@ -264,9 +288,15 @@ The image ships no clojure-lsp. pdv uses one on the container's `PATH`, else the
 
 `pdv jobs [count]` prints the newest rows of the `job` table (webhook events, delete-object, garbage collection), 15 by default. A save that seems to vanish leaves a `process-webhook-event` row that reaches `completed` seconds later, and a failed job carries its error in the same row. The query runs against the database the live backend uses, else the worktree's database, and filters on the instance's `PENPOT_TENANT` (`devenv-wsN`).
 
+### bug-report prints the checklist for whoever reports a devenv bug
+
+`pdv bug-report` prints eight items to paste to the reporter: the code and the instance (`git status -sb`, `git rev-parse HEAD`, and `pdv status --ws N`), the exact steps, the visible error, the browser console with the websocket frames, the backend pane around the failure, the job table, the timestamp with its timezone, and the scope. Items 4, 5, and 6 usually settle a report on their own. A websocket-level frontend exception shows the failing frame, a backend exception shows the stacktrace, and the job table says whether the work arrived.
+
+The checklist names the container, the tenant, and the `--ws` flag of the instance it resolved. The job-table item gives `pdv jobs --ws N` and, for a reporter without pdv, a plain `docker exec penpotdev-infra-postgres-1 psql` query against the database `pdv jobs` would read, which is the worktree's `pdvwt_<slug>` unless the live backend or a `--db` choice says otherwise. When no instance resolves, the verb still exits 0 and prints the template with placeholders, because a checklist is most needed when the instance is down. Every command in it runs in any Penpot checkout with pdv installed, and the git, docker, and psql lines need nothing else.
+
 ## The parity harness is the net every behaviour change lands behind
 
-`test/parity.sh` has two modes. The offline mode reads the window plan out of the checkout's own `start-tmux.sh` and compares it with pdv's plan, then asserts the service rules, the cache policy, the heap cap, and the seed naming rules without touching a container. It also checks the development tools against a stub `docker`: bad usage exits with the documented status before any docker call, the caller's worktree selects the instance that binds it, the test JVM's staleness guard carries the hash of `share/testjvm.clj`, and `status` names a repointed slot, a renamed tree, and a stale label. The live mode brings the same workspace up twice, with `pdv run` and with `./manage.sh run-devenv`, and compares the container state, the published ports, the mounts, and the tmux window set. A bare `pdv run` claims to be the upstream instance, so upstream is the reference. pdv runs first, because its ACL grant is what lets the upstream instance build on a rootless daemon. With `--fast`, the live mode also proves that `--recreate` keeps every named volume, that a JVM carries the cap in its environment, and that `status` reports a stopped instance.
+`test/parity.sh` has two modes. The offline mode reads the window plan out of the checkout's own `start-tmux.sh` and compares it with pdv's plan, then asserts the service rules, the cache policy, the heap cap, the seed naming rules, and the four bundle verdicts without touching a container. It also checks the development tools against a stub `docker`: bad usage exits with the documented status before any docker call, the caller's worktree selects the instance that binds it, the test JVM's staleness guard carries the hash of `share/testjvm.clj`, `bug-report` fills in the caller's instance and prints placeholders without one, and `status` names a repointed slot, a renamed tree, and a stale label. The live mode brings the same workspace up twice, with `pdv run` and with `./manage.sh run-devenv`, and compares the container state, the published ports, the mounts, and the tmux window set. A bare `pdv run` claims to be the upstream instance, so upstream is the reference. pdv runs first, because its ACL grant is what lets the upstream instance build on a rootless daemon. With `--fast`, the live mode also proves that `--recreate` keeps every named volume, that a JVM carries the cap in its environment, and that `status` reports a stopped instance.
 
 The live mode runs in agentic mode by default, so pass `--plain` when `frontend/resources/public/js/config.js` is absent.
 

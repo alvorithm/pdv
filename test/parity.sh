@@ -380,14 +380,14 @@ check_tools_usage() {
   stub=$(mktemp -d "${TMPDIR:-/tmp}/parity-tools.XXXXXX")
   make_docker_stub "$stub"
   : >"$stub/calls"
-  want="testjvm bogus:64|testjvm run 1bad:64|testjvm run --seed x:64|testjvm stop --now:64|testjvm log 0:64|eval:64|eval --timeout 0 x:64|eval --target prod x:64|jobs many:2|repl extra:2|lsp extra:2|restart:2"
+  want="testjvm bogus:64|testjvm run 1bad:64|testjvm run --seed x:64|testjvm stop --now:64|testjvm log 0:64|eval:64|eval --timeout 0 x:64|eval --target prod x:64|jobs many:2|repl extra:2|lsp extra:2|restart:2|build-frontend extra:2|bug-report extra:2|stop --build:2|stop --no-build:2|stop --watchers --build --no-build:2|stop --services backend --build:2|start --watchers --build:2"
   while IFS= read -r line; do
     # shellcheck disable=SC2086 # each case is a word list
     ( cd "$stub" && PARITY_CALLS="$stub/calls" PATH="$stub:$PATH" "$PDV" $line --repo "$ROOT" ) >/dev/null 2>&1; rc=$?
     got+="${got:+|}$line:$rc"
   done < <(printf '%s\n' "$want" | tr '|' '\n' | sed 's/:[0-9]*$//')
   if [ "$got" = "$want" ]; then
-    ok "testjvm, eval, jobs, repl, lsp and restart refuse bad usage with their documented status"
+    ok "testjvm, eval, jobs, repl, lsp, restart, build-frontend, bug-report, and the stop and start build flags refuse bad usage with their documented status"
   else
     bad "bad-usage exit statuses differ"
     printf '     want: %s\n     got:  %s\n' "$want" "$got"
@@ -432,6 +432,92 @@ check_caller_selection() {
     ok "--ws N picks an instance whatever the caller's worktree, and exits 3 when it does not run"
   else
     bad "--ws 0 against a stub with no running ws0 did not exit 3 (rc=$rc)"
+  fi
+  unset PARITY_INSPECT PARITY_CALLS
+  rm -rf "$tmp"
+}
+
+# The bundle verdict that `pdv status` prints and `pdv stop --watchers` acts
+# on is a pure function of the host tree.
+check_bundle_state() {
+  local tmp got want js
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/parity-bundle.XXXXXX")
+  js="$tmp/frontend/resources/public/js"
+  mkdir -p "$js" "$tmp/frontend/src/app" "$tmp/common/src"
+  touch -d '2026-01-01' "$tmp/frontend/src/app/main.cljs" "$tmp/common/src/a.cljc"
+  got=$( PDV_SELF="$SELF/.." . "$SELF/../lib/pdv-services.sh"
+         printf '%s\t' "$(frontend_bundle_state "$tmp")"
+         touch -d '2026-01-02' "$js/main.js"
+         printf '%s\t' "$(frontend_bundle_state "$tmp")"
+         touch -d '2026-01-03' "$tmp/common/src/a.cljc"
+         printf '%s\t' "$(frontend_bundle_state "$tmp")"
+         mkdir "$js/cljs-runtime"
+         printf '%s' "$(frontend_bundle_state "$tmp")" )
+  rm -rf "$tmp"
+  want=$(printf 'none\tcurrent\tstale common/src/a.cljc\tdev')
+  if [ "$got" = "$want" ]; then
+    ok "bundle: no main.js, a current release, a release older than a source, and a watcher's dev build are told apart"
+  else
+    bad "bundle verdicts differ (want '$want', got '$got')"
+  fi
+}
+
+# build-frontend never runs `./scripts/build app` beside a live watcher:
+# without a terminal it exits 3 with the stop hint. The stub reports a
+# running ws4 and answers every exec with a pid, so every pane reads busy.
+check_build_refuses_watcher() {
+  local tmp err rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/parity-build.XXXXXX")
+  mkdir "$tmp/t"
+  cat >"$tmp/docker" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$tmp/calls"
+case "\$*" in
+  *State.Running*\ penpot-devenv-ws4-main) echo true; exit 0 ;;
+  *Mounts*\ penpot-devenv-ws4-main) echo "$tmp/t"; exit 0 ;;
+esac
+case "\$1" in
+  inspect) echo "/penpot-devenv-ws4-main true $tmp/t" ;;
+  exec)    echo 123 ;;
+esac
+exit 0
+EOF
+  chmod +x "$tmp/docker"
+  err=$( cd "$tmp/t" && PATH="$tmp:$PATH" "$PDV" build-frontend --ws 4 --repo "$ROOT" 2>&1 >/dev/null </dev/null ); rc=$?
+  if [ "$rc" -eq 3 ] && printf '%s' "$err" | grep -qF 'pdv stop --watchers --ws 4' \
+     && ! grep -q 'scripts/build' "$tmp/calls"; then
+    ok "build-frontend refuses a busy watcher with exit 3 and the stop hint, and never runs the build"
+  else
+    bad "build-frontend beside a busy watcher (rc=$rc): $err"
+  fi
+  rm -rf "$tmp"
+}
+
+# bug-report never fails: with no instance it prints placeholders, and with
+# the caller's instance it names the container, the tenant, and the
+# worktree's own database.
+check_bug_report() {
+  local tmp out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/parity-report.XXXXXX")
+  make_docker_stub "$tmp"
+  git init -q "$tmp/penpot-x"
+  : >"$tmp/inspect"
+  export PARITY_INSPECT="$tmp/inspect" PARITY_CALLS="$tmp/calls"
+  out=$( cd "$tmp/penpot-x" && PATH="$tmp:$PATH" "$PDV" bug-report --repo "$ROOT" 2>&1 ); rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qF 'docker exec -u penpot penpot-devenv-wsN-main tmux capture-pane' \
+     && printf '%s' "$out" | grep -qF 'pdv jobs --ws N'; then
+    ok "bug-report with no running instance prints the checklist with placeholders and exits 0"
+  else
+    bad "bug-report with no instance (rc=$rc): $(printf '%s' "$out" | head -3)"
+  fi
+  printf '/penpot-devenv-ws2-main true %s\n' "$tmp/penpot-x" >"$tmp/inspect"
+  out=$( cd "$tmp/penpot-x" && PATH="$tmp:$PATH" "$PDV" bug-report --repo "$ROOT" 2>&1 ); rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qF -- '-d pdvwt_penpot_x -At' \
+     && printf '%s' "$out" | grep -qF "tenant='devenv-ws2'" \
+     && printf '%s' "$out" | grep -qF 'pdv status --ws 2'; then
+    ok "bug-report names the caller's instance, its tenant, and the worktree's database"
+  else
+    bad "bug-report did not fill in the caller's instance (rc=$rc): $(printf '%s' "$out" | grep -E 'psql|tenant=' | head -2)"
   fi
   unset PARITY_INSPECT PARITY_CALLS
   rm -rf "$tmp"
@@ -733,6 +819,9 @@ if [ "$MODE" = "offline" ]; then
   check_tools_usage
   check_caller_selection
   check_testjvm_forms
+  check_bundle_state
+  check_build_refuses_watcher
+  check_bug_report
   check_status_served
 else
   IFS=',' read -ra WS_LIST <<<"$WSD"
