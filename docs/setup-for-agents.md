@@ -31,14 +31,14 @@ A host agent runs every step below directly. A container agent runs step 0 and s
 Runs on the host.
 
 ```sh
-for c in bash git curl docker setfacl readlink sha256sum; do
+for c in bash git curl docker setfacl readlink sha256sum python3; do
   printf '%-9s %s\n' "$c" "$(command -v "$c" || echo MISSING)"
 done
 printf 'bash %s\n' "${BASH_VERSINFO[0]}"
 docker info -f '{{.ServerVersion}}' >/dev/null && echo "daemon reachable"
 ```
 
-Success: a path for `bash`, `git`, `curl`, `docker`, `readlink`, and `sha256sum`, a bash major version of 4 or more, and `daemon reachable`. `setfacl` may print `MISSING` here, because only a rootless host needs it and step 2 settles which host this is.
+Success: a path for `bash`, `git`, `curl`, `docker`, `readlink`, and `sha256sum`, a bash major version of 4 or more, and `daemon reachable`. `setfacl` may print `MISSING` here, because only a rootless host needs it and step 2 settles which host this is. `python3` may print `MISSING` too, because only `pdv repl`, the editor REPL bridge, needs it.
 
 A `MISSING` line, or bash 3, is a package to install. Each command below needs root, so hand the one matching the machine to the developer and wait for the answer.
 
@@ -136,7 +136,7 @@ Success: `pdv run` prints `instance ws0 ready`, then the UI at `https://localhos
 
 The first run is the slow one. It pulls the image when it is absent, grants the ACL, brings up the shared infrastructure, creates the worktree's database, and the frontend's first start builds the Rust/WASM renderer. Later starts keep the compile caches, and only `--clean` rebuilds them. Running the same command on an instance that is already up tunes it and starts the windows that are missing or stopped, so a second run is safe. `pdv attach` opens tmux in the instance and `pdv stop` stops it.
 
-Failure: pdv reports in place rather than attaching, so read the report before changing anything. A failed start prints the container's state and the last 80 log lines. A tmux session that does not appear within 120 seconds prints the last 40. `pdv status --ws 0` prints the same report for an instance that is running but broken, and `pdv logs` follows the container log. The failures worth expecting at this step are `port is already allocated`, `EACCES` in a watcher pane, a log ending with `host not found in upstream`, and `seed: profile '<name>' is not in <PDV_FIXTURES>/profiles`. Step 9 carries each one.
+Failure: pdv reports in place rather than attaching, so read the report before changing anything. A failed start prints the container's state and the last 80 log lines. A tmux session that does not appear within 120 seconds prints the last 40. `pdv status --ws 0` prints the same report for an instance that is running but broken, and `pdv logs` follows the container log. The failures worth expecting at this step are `port is already allocated`, `EACCES` in a watcher pane, a log ending with `host not found in upstream`, and `seed: profile '<name>' is not in <PDV_FIXTURES>/profiles`. Step 10 carries each one.
 
 ## 6. Seed the database from fixtures
 
@@ -218,13 +218,30 @@ pdv run --agentic --services frontend,backend,mcp
 ./manage.sh start-coding-agent claude
 ```
 
-Success: `pdv run` adds an `mcp` window to the plan and prints the usual ready block. It writes `frontend/resources/public/js/config.js` when the file is absent, because the frontend enables MCP only through that file, and it writes the MCP client configurations through `manage.sh`: `.devenv/mcp/claude-code.json`, `.devenv/mcp/opencode.json`, and `.vscode/mcp.json`. `start-coding-agent` then starts the client with the matching configuration and no error.
+Success: `pdv run` adds an `mcp` window to the plan and prints the usual ready block. It writes `frontend/resources/public/js/config.js` when the file is absent, because the frontend enables MCP only through that file, and it writes the MCP client configurations through `manage.sh` into the directory the Penpot repository tracks for them: `.devenv/mcp/claude-code.json`, `.devenv/mcp/opencode.json`, and `.vscode/mcp.json`. `start-coding-agent` then starts the client with the matching configuration and no error.
 
 The ports are the instance's own: the MCP server answers on `4401 + N × 10000` and Serena on `14181 + N × 10000`, so ws0 uses 4401 and 14181, and ws2 uses 24401 and 34181. Naming `mcp` or `serena` in `--services` turns agentic mode on by itself, and `--agentic` with no `--services` gives every window.
 
 Failure: `start-coding-agent: instance 'ws0' is not running` means the instance is down. `start-coding-agent: '<client>' is not on PATH` means the client binary is missing. `start-coding-agent: ... .devenv/mcp/claude-code.json not found` means the agentic run did not write the configurations, which happens when `.devenv/shared` or `.devenv/templates` is missing from the checkout. The merge step calls `python3`, so a host without it fails here. `--opencode-config-dir DIR` mounts a personal opencode configuration, and `--serena-context CTX` changes Serena's context.
 
-## 9. Troubleshooting
+## 9. Give the agent's harness the pdv skill
+
+Runs on the host.
+
+pdv carries an agent skill, `skills/pdv/SKILL.md`, with the sequences `pdv help` does not spell out: which instance to use, how to run backend tests, how to restart the backend, and how to connect an editor. A harness loads a skill from its user-level skill directory, so link the skill there. Claude Code reads `~/.claude/skills`, and a harness that follows the Agent Skills layout reads `~/.agents/skills`. Link it for each harness the developer uses:
+
+```sh
+mkdir -p ~/.claude/skills ~/.agents/skills
+ln -s ~/Code/pdv/skills/pdv ~/.claude/skills/pdv
+ln -s ~/Code/pdv/skills/pdv ~/.agents/skills/pdv
+head -3 ~/.claude/skills/pdv/SKILL.md ~/.agents/skills/pdv/SKILL.md
+```
+
+Success: `head` prints `---` and `name: pdv` for each link, which proves the link resolves into the pdv checkout. A `git pull` in `~/Code/pdv` then updates the skill with no further step. A new harness session lists `pdv` among its skills, and in Claude Code `/skills` shows it.
+
+Failure: `File exists` means an older copy or link is there. Inspect it with `ls -l ~/.claude/skills/pdv`, and replace it with `ln -sfn ~/Code/pdv/skills/pdv ~/.claude/skills/pdv` only when it is a link or a copy of this skill. `No such file or directory` from `head` means the clone is elsewhere, so link from the real checkout path.
+
+## 10. Troubleshooting
 
 | symptom                                                                                                           | what it means                                                                                                      | fix                                                                                                |
 | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
@@ -239,10 +256,12 @@ Failure: `start-coding-agent: instance 'ws0' is not running` means the instance 
 | a worktree's database has no fixtures                                                                             | the profile never applied, or the worktree uses the built-in profile                                               | `pdv seed --ws N`, then `pdv seed status`                                                          |
 | `.pdv-agent.json` is missing after a run                                                                          | no seed ran, or the profile marks no agent user                                                                    | `pdv seed --ws N`, and check the profile's `agent: true`                                           |
 | the tmux session does not appear within 120 seconds                                                               | the container is up but its windows are not                                                                        | read the last 40 log lines pdv printed, then `pdv logs`                                            |
+| `pdv testjvm` or `pdv eval` exits 3 and lists the running instances                                               | no running instance binds the worktree the command ran from                                                        | run it from that worktree, or pass `--ws N`                                                        |
+| `pdv testjvm run` exits 5 with `restart needed`                                                                   | the classpath, a reload-exempt namespace, or pdv's test harness changed since the JVM started                     | `pdv testjvm restart`                                                                              |
 | `pdv status` lists no containers                                                                                  | the shell's `docker` points at a daemon that holds no Penpot instance                                              | compare `docker context show` and `DOCKER_HOST` with step 2                                        |
 
 ## Where the detail lives
 
-- `pdv help` lists every verb and flag, and the environment variables.
-- The manual explains the model behind each step: [instances and the ws slot](manual-pdv.md#an-instance-is-wsn-and-ws0-binds-the-checkout-pdv-runs-against), [services](manual-pdv.md#a-service-is-a-window-and-storybook-also-names-a-compile-target), [the per-worktree database](manual-pdv.md#each-worktree-gets-its-own-database-and-bucket), [the profile schema](manual-pdv.md#a-profile-is-what-goes-into-the-database), [the database's lifetime](manual-pdv.md#the-database-lives-as-long-as-its-worktree), [the ACL grant and the tune](manual-pdv.md#two-hygiene-verbs-prepare-the-tree-and-the-container), [the admin-console](manual-pdv.md#the-admin-console-is-off-because-no-devenv-runs-one), [the heap cap](manual-pdv.md#the-heap-cap-travels-in-_java_options-because-two-scripts-reset-java_opts), [the cache policy](manual-pdv.md#a-watcher-restart-keeps-the-caches-and---clean-answers-a-toolchain-change), [the recreate path](manual-pdv.md#a-container-on-a-dead-network-is-the-zombie-that---recreate-removes), and [failure reporting](manual-pdv.md#failures-are-reported-in-place-never-through-an-attach).
+- `pdv help` lists every verb and flag, and the environment variables. `pdv testjvm help` and `pdv eval --help` list the test JVM's subcommands and exit codes.
+- The manual explains the model behind each step: [instances and the ws slot](manual-pdv.md#an-instance-is-wsn-and-ws0-binds-the-checkout-pdv-runs-against), [services](manual-pdv.md#a-service-is-a-window-and-storybook-also-names-a-compile-target), [the per-worktree database](manual-pdv.md#each-worktree-gets-its-own-database-and-bucket), [the profile schema](manual-pdv.md#a-profile-is-what-goes-into-the-database), [the database's lifetime](manual-pdv.md#the-database-lives-as-long-as-its-worktree), [the ACL grant and the tune](manual-pdv.md#two-hygiene-verbs-prepare-the-tree-and-the-container), [the admin-console](manual-pdv.md#the-admin-console-is-off-because-no-devenv-runs-one), [the heap cap](manual-pdv.md#the-heap-cap-travels-in-_java_options-because-two-scripts-reset-java_opts), [the cache policy](manual-pdv.md#a-watcher-restart-keeps-the-caches-and---clean-answers-a-toolchain-change), [the recreate path](manual-pdv.md#a-container-on-a-dead-network-is-the-zombie-that---recreate-removes), [failure reporting](manual-pdv.md#failures-are-reported-in-place-never-through-an-attach), [the status warnings](manual-pdv.md#pdv-status-names-what-has-drifted-since-the-container-started), and [the development tools](manual-pdv.md#the-development-tools-act-on-the-instance-that-serves-your-worktree).
 - `README.md` is the short form of the same surface.

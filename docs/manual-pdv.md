@@ -4,13 +4,13 @@ genre: manual
 
 # pdv runs one Penpot instance with the windows and the memory budget the work needs
 
-The command is `pdv`, and it lives in this repository. `pdv help` lists the verbs and flags it owns. This manual states the intent behind them: which window a service owns, which database and bucket a worktree writes to, which channel carries the heap cap, what a restart costs, and what to do when a container will not come up.
+The command is `pdv`, and it lives in this repository. `pdv help` lists the verbs and flags it owns. This manual states the intent behind them: which window a service owns, which database and bucket a worktree writes to, which channel carries the heap cap, what a restart costs, how tests and editors reach a running backend, and what to do when a container will not come up.
 
 ## One command owns the window set, and manage.sh owns everything else
 
 A Penpot development instance is a Docker container with a tmux session inside it. Upstream's `manage.sh run-devenv` creates that container and runs `start-tmux.sh`, which fixes the window set: the frontend watcher, Storybook, the exporter, the backend, and, in agentic mode, the MCP server and Serena. pdv takes the window set over, because the selection, the heap cap, and the cache policy all live in the command that starts a window.
 
-Everything else stays upstream's. pdv loads `manage.sh` and calls its compose functions, so the ports, container names, volumes, network, and workspace paths come from the checkout rather than from a copy inside pdv. A verb pdv does not own is executed as `manage.sh <verb> <args>` with no translation. pdv calls no other script from the checkout: the two hygiene verbs, described later in this manual, are pdv's own code.
+Everything else stays upstream's. pdv loads `manage.sh` and calls its compose functions, so the ports, container names, volumes, network, and workspace paths come from the checkout rather than from a copy inside pdv. A verb pdv does not own is executed as `manage.sh <verb> <args>` with no translation. pdv calls no other script from the checkout: the hygiene verbs and the development tools, described later in this manual, are pdv's own code. The code that runs inside the container lives in pdv's `share/` directory and travels as `docker exec` arguments, because pdv's checkout is not mounted there.
 
 The parity harness checks that the arrangement holds.
 
@@ -127,7 +127,9 @@ The test database is separate either way: the instance overrides the name `penpo
 
 `storybook` selects two things: its own window and the `storybook` target inside the frontend watcher. A selection that names `storybook` must also name `frontend`, and pdv refuses the list otherwise. `--watchers` is the `frontend,storybook,exporter` shorthand. `--only-backend` is `--services backend` under its old name.
 
-`pdv start` and `pdv stop` toggling follow the same names. `stop --services frontend` sends an interrupt to the frontend window's panes and leaves the window and its shells in place. `start --services frontend` types the command back into the idle pane. A window that is absent is created at the next free index, so a backend-only instance can gain the exporter later. Before pdv starts a watcher it checks for `node_modules` in that service's tree and runs `./scripts/setup` when the directory is missing, because upstream installs those dependencies before its own windows exist and a backend-only run has not installed them.
+`pdv start` and `pdv stop` toggling follow the same names. `stop --services frontend` sends an interrupt to the frontend window's panes and leaves the window and its shells in place. `start --services frontend` types the command back into the idle pane, and leaves a pane that is already running alone. A window that is absent is created at the next free index, so a backend-only instance can gain the exporter later. Before pdv starts a watcher it checks for `node_modules` in that service's tree and runs `./scripts/setup` when the directory is missing, because upstream installs those dependencies before its own windows exist and a backend-only run has not installed them.
+
+`pdv restart --services LIST` stops the named windows and then starts them, which is the way to restart a running backend after a change that a reload cannot reach. The restart is a full process restart in the window, never `(app.main/restart)`, because the in-JVM refresh reloads vendored promesa under live channels and can park the msgbus loop, after which graph sync, websocket notifications, and realtime collaboration stay dead. When `backend` is among the names, the verb waits up to 300 seconds for the new process to open its nREPL on port 6064.
 
 `stop` without a selector is not a window verb. It stops the instance through `manage.sh stop-devenv`, which also stops the shared infrastructure when no other instance remains. `manage.sh` stops only running instances, so a container that stopped outside pdv (a Docker daemon restart, a host shutdown) would stay forever. pdv therefore first removes the target's main container when it exists and is not running, through `manage.sh`'s own `stop-instance`, and `--all` does the same for every devenv container on the daemon. Volumes stay.
 
@@ -175,6 +177,12 @@ A container that cannot come up reports its state (`status`, `running`, `exit`, 
 
 A start waits for four things before it reports success: the container in the running state, a five-second settle after that, an answer from the health endpoint on port 8082, and the tmux session. The settle catches nginx dying just after Docker reports the container as running.
 
+## pdv status names what has drifted since the container started
+
+The mount source and the compose `working_dir` label are recorded when a container is created, so a worktree rename or a repointed slot symlink leaves both naming a path the bind left long ago. `pdv status` therefore asks the container for the device and inode it sees at `/home/penpot/penpot`, and matches them against the host paths the bind could have come from: the recorded source and its target, every workspace slot and its target, and every worktree of the checkout. It prints a warning with the recreate command when the recorded source no longer exists or now resolves to another tree, and a `serves:` line naming the tree the container really serves. A stale `working_dir` label gets a warning of its own, which is cosmetic, because the next `--recreate` rewrites it.
+
+Inside the tmux session, every pane of a pdv window that runs nothing gets a warning with the `pdv start --services` command that revives it. An idle pane is either a deliberate `pdv stop` or a process that died, and in both cases the UI serves whatever bundle is on disk. A frontend window with no `frontend/resources/public/js/main.js` in the tree gets a warning that the UI is a blank page until the first compile lands.
+
 ## Two hygiene verbs prepare the tree and the container
 
 `pdv acl` grants the container user write access to the bound tree. Rootless Docker maps the image's `penpot` user to a subordinate uid, which the host treats as `other` on a tree the host user owns, so every dependency install in the watcher windows fails with `EACCES`. pdv measures that uid with a one-shot container, grants it a read-write ACL and a default ACL on every entry the host user owns, and proves the grant by writing from inside a container. A rootful daemon maps the uid one to one, and the verb then reports that it has nothing to grant. `run` applies the grant before every start. A wsN slot that `manage.sh` fills with a copy does not exist before the first start, so grant the copy with `pdv acl --ws N` once it exists, or symlink a worktree into the slot beforehand.
@@ -188,9 +196,77 @@ A start waits for four things before it reports success: the container in the ru
 - **Cargo home.** The image's `/opt/cargo` is owned by root, so a render-wasm build that must fetch a crate missing from the vendored set fails with `Permission denied`. The tune hands the directory to the container user.
 - **Image currency.** The tune compares the running container's image with the local image and the local image with the registry, and prints the adoption command when either is stale.
 
+## The development tools act on the instance that serves your worktree
+
+`testjvm`, `eval`, `repl`, `lsp`, and `jobs` work on a running instance. Without `--ws`, each one picks the running instance whose `/home/penpot/penpot` bind resolves to the git toplevel of the directory you call it from, so a session in a worktree reaches that worktree's instance with no flag. When no running instance serves that worktree, the verb lists every running instance with the tree it serves and exits 3. `--ws N` names an instance whatever the directory is. Every other verb keeps the ws0 default.
+
+`testjvm` and `eval` print the choice on their first line, in the form `[pdv] instance: penpot-devenv-ws2-main  (worktree: <host path>)`.
+
+### A persistent test JVM runs focused backend tests in under a second
+
+A cold `clojure -M:dev:test --focus <id>` starts a JVM, resolves the classpath, and loads the whole backend on every run. `pdv testjvm start` keeps one JVM up inside the instance on the same classpath (`-M:dev:test` plus a `-Sdeps` alias that adds clj-reload and replaces `kaocha.runner` with pdv's `share/testjvm.clj`), with its nREPL on `127.0.0.1:6065` inside the container. `pdv testjvm run <id>…` reloads the namespaces whose files changed since the last run, plus the loaded namespaces that depend on them, and then runs kaocha with the repository's `tests.edn` and the ids `--focus` takes: a namespace, a var (`ns/test-name`), or a suite keyword (`:unit`). No id runs the whole suite. A focused run of `backend-tests.config-test` takes 0.8 seconds in a warm JVM.
+
+```sh
+pdv testjvm start                              # once per container
+pdv testjvm run backend-tests.rpc-doc-test     # a namespace
+pdv testjvm run backend-tests.rpc-doc-test/<test-name>   # one var
+pdv testjvm run --seed 1912381049 <id>         # replay kaocha's random order
+pdv testjvm cold --focus backend-tests.rpc-doc-test   # a fresh JVM, as CI runs it
+```
+
+The JVM never touches the running backend. It has its own process, its own nREPL port, its own log4j2 file under `/tmp/penpot-testjvm`, and the test database the container's `PENPOT_TEST_*` variables name. It starts with `-Xmx2g`, adds `enable-backend-asserts` to `PENPOT_FLAGS` as CI does (without it `app.config` compiles every `assert` out), dies with the container, and exits by itself after two hours without a call.
+
+`run`, `reload`, and `cold` hold `/tmp/penpot-backend-test.lock` inside the container, one lock per instance, because every run on an instance shares its test database. A run waits for the lock within its `--timeout` (default 1800 seconds), and no test starts after the deadline. `start`, `stop`, and `restart` take a host lock per container, so parallel callers never start a second JVM. `stop` refuses while a run holds the JVM unless `--force`.
+
+Restart the JVM after a change to `backend/deps.edn` or `common/deps.edn`, because the classpath is fixed at start, after an edit under `backend/dev` or to a namespace exempt from reload (`app.system`, `app.common.debug`, `user`), and after pdv's `share/testjvm.clj` changes. `run` and `reload` answer exit 5 and name the file in those cases. A reload that fails prints one line with the file, the line, and the cause, and the JVM stays usable.
+
+| exit | `run` and `reload`                                                                     |
+| ---- | -------------------------------------------------------------------------------------- |
+| 0    | every test passed                                                                      |
+| 1    | a test failed or errored, or no test matched the ids                                   |
+| 2    | the reload failed and nothing ran                                                      |
+| 3    | the JVM is down or died during the call, or no running instance serves the worktree    |
+| 4    | the deadline passed, the wait for the lock timed out, or `cancel` stopped the run      |
+| 5    | the JVM needs a restart (for `stop` and `restart`: a run holds the JVM)                |
+| 6    | the storage is not writable by `penpot`, or the harness failed                         |
+| 64   | bad usage                                                                              |
+
+`cold` exits with kaocha's status. A build or a test run as the container's root leaves directories under `/tmp/penpot` and `backend/assets` that `penpot` cannot write, and `pdv testjvm repair` gives them back.
+
+### eval runs Clojure in the test JVM or the running backend
+
+`pdv eval` sends code over nREPL and prints output as the JVM prints it, then each top-level form's value. The default target is the test JVM, which reloads what changed first and is isolated from the running system, so it is the safe place to check a function or an assumption. `--target backend` reaches the running backend's nREPL on 6064, with `app.system/system` and the instance's database, and reloads nothing.
+
+```sh
+pdv eval '(+ 1 2)'                                  # the test JVM, after a reload
+pdv eval - <<'EOF'                                  # quotes and newlines need no escaping
+(require 'app.common.data)
+(app.common.data/index-by :id [{:id 1}])
+EOF
+pdv eval --target backend --file backend/src/app/rpc/commands/files.clj   # hot-load an edited file
+```
+
+`--file` loads a host file with the nREPL `load-file` op, so errors cite its path and lines, and the container need not see the file. `eval` shares the exit table of `run`, except that 1 means the code threw and 4 means no answer within `--timeout` (default 120 seconds). Write fully qualified names, because an alias in `user` keeps pointing at the namespace object a reload replaced.
+
+### repl bridges an editor to the backend
+
+The host cannot reach the container's nREPL, because the devenv publishes no nREPL port. `pdv repl` makes the path. It starts a second nREPL server on 6066 inside the backend JVM with the cider-nrepl middleware, which Clojure 1.12's `add-lib` fetches into the running JVM, so the backend's dependencies stay untouched. It then writes `.nrepl-port` into the worktree and runs `lib/repl-bridge.py` in the foreground, which listens on host port `6064 + N × 10000` and pipes each connection through `docker exec`. The bridge needs `python3` on the host.
+
+`CIDER_NREPL_VERSION` picks the cider-nrepl release, and an editor passes the one its CIDER expects. The first version loaded stays for the JVM's life, because `add-lib` skips a library already on the classpath, so restart the backend after a CIDER upgrade. A backend restart also takes the 6066 server down, and the next `pdv repl` brings it back. When cider-nrepl cannot start, the bridge serves the backend's plain nREPL. A new `pdv repl` on an instance replaces the bridge that already holds its port, and an editor that manages the bridge itself finds it by the pattern `repl-bridge.py .*--listen-port <port>`.
+
+### lsp runs clojure-lsp inside the instance
+
+An editor runs `pdv lsp` as its clojure-lsp binary, with no arguments or with `--ws N`. The verb starts `share/lsp-bridge.py` inside the container, which runs clojure-lsp as `penpot` with the container's classpath (`.m2`, `.gitlibs`) and rewrites every path between the host tree and `/home/penpot/penpot`. Stdout carries the protocol, so pdv prints its own messages on stderr. One editor session is one `docker exec` and one clojure-lsp, and both end when the editor closes the stream.
+
+The image ships no clojure-lsp. pdv uses one on the container's `PATH`, else the binary Serena downloads into `~/.serena` in the home volume, which an agentic start provides. With neither, the verb exits 1 and says so.
+
+### jobs reads the instance's job table
+
+`pdv jobs [count]` prints the newest rows of the `job` table (webhook events, delete-object, garbage collection), 15 by default. A save that seems to vanish leaves a `process-webhook-event` row that reaches `completed` seconds later, and a failed job carries its error in the same row. The query runs against the database the live backend uses, else the worktree's database, and filters on the instance's `PENPOT_TENANT` (`devenv-wsN`).
+
 ## The parity harness is the net every behaviour change lands behind
 
-`test/parity.sh` has two modes. The offline mode reads the window plan out of the checkout's own `start-tmux.sh` and compares it with pdv's plan, then asserts the service rules, the cache policy, the heap cap, and the seed naming rules without touching a container. The live mode brings the same workspace up twice, with `pdv run` and with `./manage.sh run-devenv`, and compares the container state, the published ports, the mounts, and the tmux window set. A bare `pdv run` claims to be the upstream instance, so upstream is the reference. pdv runs first, because its ACL grant is what lets the upstream instance build on a rootless daemon. With `--fast`, the live mode also proves that `--recreate` keeps every named volume, that a JVM carries the cap in its environment, and that `status` reports a stopped instance.
+`test/parity.sh` has two modes. The offline mode reads the window plan out of the checkout's own `start-tmux.sh` and compares it with pdv's plan, then asserts the service rules, the cache policy, the heap cap, and the seed naming rules without touching a container. It also checks the development tools against a stub `docker`: bad usage exits with the documented status before any docker call, the caller's worktree selects the instance that binds it, the test JVM's staleness guard carries the hash of `share/testjvm.clj`, and `status` names a repointed slot, a renamed tree, and a stale label. The live mode brings the same workspace up twice, with `pdv run` and with `./manage.sh run-devenv`, and compares the container state, the published ports, the mounts, and the tmux window set. A bare `pdv run` claims to be the upstream instance, so upstream is the reference. pdv runs first, because its ACL grant is what lets the upstream instance build on a rootless daemon. With `--fast`, the live mode also proves that `--recreate` keeps every named volume, that a JVM carries the cap in its environment, and that `status` reports a stopped instance.
 
 The live mode runs in agentic mode by default, so pass `--plain` when `frontend/resources/public/js/config.js` is absent.
 

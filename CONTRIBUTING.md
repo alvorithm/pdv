@@ -6,7 +6,7 @@ pdv sits on top of Penpot's `manage.sh` and its devenv image. Part of what pdv d
 
 - A behaviour change lands with the parity harness covering it. `test/parity.sh` runs offline by default. `test/parity.sh --live --fast --ws N` adds the comparison with `./manage.sh run-devenv` on a real instance. The live mode removes the instance's container, so point it at a workspace nobody is using.
 - pdv never restates the compose environment that `manage.sh` computes. pdv loads `manage.sh` and calls its functions, and a verb pdv does not own falls through to `manage.sh` unchanged.
-- pdv depends only on the checkout's `manage.sh`, the files tracked in the Penpot repository, the devenv image, and bash, coreutils, `curl` and Docker on the host. It calls no untracked helper from the checkout, so it runs on a stock clone.
+- pdv depends only on the checkout's `manage.sh`, the files tracked in the Penpot repository, the devenv image, and bash, coreutils, `curl` and Docker on the host. `pdv repl` alone also needs `python3` on the host, for the bridge an editor connects to. pdv calls no untracked helper from the checkout, so it runs on a stock clone, and code that runs inside the container ships in pdv's `share/`.
 - The README and the manual carry the user-facing surface. A flag that changes behaviour changes them in the same commit.
 - Scripts need bash 4 or newer and pass `bash -n`.
 - A new workaround gets its own section below, naming the pdv code and the upstream form.
@@ -118,6 +118,24 @@ In Penpot: the repository commits the symlink. Git cannot re-include a path unde
 pdv today: the image ships `tmux.conf` with the mouse off, and its entrypoint copies the file over `~/.tmux.conf` on every start. With `PDV_TMUX_MOUSE=1`, `pdv tune` turns the mouse on in the running session.
 
 In Penpot: the image's `tmux.conf` ends with `source-file -q ~/.tmux.conf.local`. That file lives in the home volume, survives a recreate, and holds each developer's own settings, so pdv drops its variable. The same change is the moment to offer zellij beside tmux: its layouts are declarative KDL files that could replace the imperative `start-tmux.sh`, and a variable such as `PENPOT_MULTIPLEXER` would select it, with tmux as the default. That option needs zellij in the image, and a port of the `tmux send-keys` calls in `start-tmux.sh` and pdv and of pdv's `tmux list-windows` calls.
+
+### Editors reach the backend's nREPL through a bridge
+
+pdv today: `docker-compose.main.yml` publishes no nREPL port, and the host cannot route to the container, so a host editor cannot reach the backend's nREPL on 6064. That server also has the default handler only, so CIDER cannot find definitions, show docs, or debug. `pdv repl` fetches cider-nrepl into the running backend with `add-lib`, starts a second server on 6066 with its handler, and runs `lib/repl-bridge.py` on host port `6064 + N × 10000` (`lib/pdv-tools.sh::cmd_repl`).
+
+In Penpot: the compose file publishes the backend's nREPL on `127.0.0.1`, offset per instance like the other ports, and the backend's `:dev` alias carries cider-nrepl and starts its server with `cider-nrepl-handler`. pdv then drops the bridge, the second server, and the host `python3`.
+
+### clojure-lsp ships in the image
+
+pdv today: the devenv image carries no clojure-lsp, so `pdv lsp` runs one from the container's `PATH` when present, else the binary Serena downloads into the home volume, which only an agentic start provides (`lib/pdv-tools.sh::cmd_lsp`).
+
+In Penpot: `docker/devenv/Dockerfile` installs clojure-lsp onto `PATH`. pdv then drops the Serena fallback.
+
+### Backend tests run in a persistent JVM
+
+pdv today: every focused backend test run is a cold `clojure -M:dev:test --focus <id>`, which starts a JVM and loads the whole backend first. `pdv testjvm` keeps one JVM up on the `:dev:test` classpath with clj-reload, reloads what changed before each run, and serializes runs on an instance's test database with a lock (`share/testjvm.clj`, `lib/pdv-tools.sh::cmd_testjvm`).
+
+In Penpot: the backend ships the same entry point, an alias that adds clj-reload and a test-JVM namespace under `backend/dev`, with `backend/scripts/test-jvm` taking the lock. pdv then calls that script and drops its copy of the harness.
 
 ## The implementation language is open
 

@@ -2,13 +2,14 @@
 
 Penpot's `manage.sh run-devenv` starts four windows at once: the frontend watcher, Storybook, the exporter, and the backend, plus the MCP and Serena windows in agentic mode. On a laptop, four windows mean more heap and more compiling than the work needs. pdv starts the windows you name, caps the heap of the three JVMs those windows start, and keeps the compile caches between restarts.
 
-pdv owns the instance bring-up and the window set, the per-worktree database and its seeding, plus two hygiene verbs that `run` also applies on its own: `acl` and `tune`. Any other `manage.sh` verb runs unchanged, so `pdv pull-devenv` is `manage.sh pull-devenv` and an upstream flag works here on the day it lands. pdv depends on nothing but the checkout's `manage.sh`, the files the Penpot devenv image ships, and `curl` on the host.
+pdv owns the instance bring-up and the window set, the per-worktree database and its seeding, the development tools on a running instance (a persistent test JVM, Clojure evaluation, the editor REPL and language server, and the job table), plus two hygiene verbs that `run` also applies on its own: `acl` and `tune`. Any other `manage.sh` verb runs unchanged, so `pdv pull-devenv` is `manage.sh pull-devenv` and an upstream flag works here on the day it lands. pdv depends on nothing but the checkout's `manage.sh`, the files the Penpot devenv image ships, and `curl` on the host, plus `python3` on the host for `pdv repl`.
 
 ## Requirements
 
 - Docker, rootless or rootful, with the Penpot devenv image (`./manage.sh pull-devenv`).
 - A Penpot checkout that carries `manage.sh`.
 - bash 4 or newer, coreutils, and `curl` on the host.
+- `python3` on the host for `pdv repl` alone, which runs the host side of the editor REPL bridge.
 - `setfacl` (the `acl` package) on a rootless Docker host.
 - A checkout of the fixture repository (`~/Code/penpot-fixtures`, or `PDV_FIXTURES`) for named seed profiles. Without it, a database gets pdv's built-in default users and no fixtures.
 
@@ -100,18 +101,36 @@ When the container exits during a start, pdv reads the log and prints the diagno
 ## Everyday commands
 
 ```sh
-pdv status                      # every instance, with its state and window set
+pdv status                      # every instance, with its state, window set, and warnings
 pdv status --ws 2               # one instance; a crashed one prints its state and a log tail
 pdv seed                        # rebuild this instance's database from its profile
 pdv seed status --ws 2          # the profile, hash, seeded-at, schema head, and files
 pdv stop --watchers             # stop the three watcher windows, keep the instance
 pdv start --watchers            # start them again in the same windows
+pdv restart --services backend  # restart the backend process in its window and wait for it
 pdv stop                        # stop the instance, through manage.sh stop-devenv; also removes a container already stopped
 pdv attach                      # tmux inside the instance
 pdv logs                        # follow the container log
 ```
 
-`start` and `stop` with a selector act on windows. `stop` without a selector is the instance stop. No pdv verb attaches to a container to report a failure: a failed start reports the container's state and the last log lines, and a tmux session that does not appear within 120 seconds reports the last 40.
+`start` and `stop` with a selector act on windows, and `start` leaves a window that is already running alone. `stop` without a selector is the instance stop. No pdv verb attaches to a container to report a failure: a failed start reports the container's state and the last log lines, and a tmux session that does not appear within 120 seconds reports the last 40. `pdv status` also warns about a bind that a rename or a repointed slot has left behind, a stale compose label, and every pane of a pdv window that runs nothing.
+
+## Develop against a running instance
+
+These verbs act on the running instance that serves the worktree you call them from, so they need no `--ws` inside a worktree. When no instance serves it, they list what each running instance serves and exit 3. `--ws N` names one explicitly.
+
+```sh
+pdv testjvm start                                # a persistent backend test JVM, once per container
+pdv testjvm run backend-tests.rpc-doc-test       # reload what changed, then run kaocha on the ids
+pdv testjvm cold --focus backend-tests.rpc-doc-test   # a fresh JVM, as CI runs it
+pdv eval '(+ 1 2)'                               # Clojure in the test JVM
+pdv eval --target backend --file backend/src/app/rpc/commands/files.clj   # hot-load into the running backend
+pdv repl                                         # cider-nrepl bridged to host port 6064 + 10000·N
+pdv lsp                                          # clojure-lsp inside the instance, as an editor's server binary
+pdv jobs 20                                      # the newest rows of the instance's job table
+```
+
+`pdv testjvm help` and `pdv eval --help` list the subcommands, flags, and exit codes. [The manual](docs/manual-pdv.md#the-development-tools-act-on-the-instance-that-serves-your-worktree) explains the lock, the reload, and when the test JVM needs a restart.
 
 ## The hygiene verbs
 
@@ -132,12 +151,15 @@ pdv tune                        # post-start fixes (config.js, clojure-lsp, skil
 | a watcher pane is idle after a restart                                                | `pdv start --watchers`, which installs missing node dependencies first                                 |
 | a worktree's database has no fixtures, or the backend sits on another database        | `pdv seed --ws N` rebuilds the database and restarts the backend on it                                 |
 | `.pdv-agent.json` is missing after a run                                              | `pdv seed --ws N`, and check that the profile marks an agent user                                      |
+| `pdv testjvm run` or `pdv eval` exits 5 with `restart needed`                         | `pdv testjvm restart`, because the classpath, a reload-exempt namespace, or pdv's harness changed      |
+| `pdv testjvm` or `pdv eval` exits 3 and lists the running instances                   | run it from the worktree an instance serves, or pass `--ws N`                                          |
+| a backend change does not take effect and a reload cannot reach it                    | `pdv restart --services backend`                                                                       |
 
 ## The manual and the harness carry the detail
 
-`pdv help` lists the commands and flags it owns. [The manual](docs/manual-pdv.md) explains the service model, the heap channel, the cache policy, the recreate path, the hygiene verbs, and the parity harness. Much of what pdv does works around gaps in Penpot's devenv: [CONTRIBUTING.md](CONTRIBUTING.md) lists each workaround with the change that would move it into Penpot, and the checks a contribution passes.
+`pdv help` lists the commands and flags it owns. [The manual](docs/manual-pdv.md) explains the service model, the heap channel, the cache policy, the recreate path, the status warnings, the hygiene verbs, the development tools, and the parity harness. Much of what pdv does works around gaps in Penpot's devenv: [CONTRIBUTING.md](CONTRIBUTING.md) lists each workaround with the change that would move it into Penpot, and the checks a contribution passes.
 
-The parity harness checks the contract in two modes. The offline mode reads the window plan, the service rules, the cache policy, the heap cap, and the seed naming rules out of the checkout and compares them with pdv's. The live mode brings the same workspace up with `pdv run` and with `./manage.sh run-devenv`, compares the two instances, and tears both down.
+The parity harness checks the contract in two modes. The offline mode reads the window plan, the service rules, the cache policy, the heap cap, and the seed naming rules out of the checkout and compares them with pdv's, and checks the development tools and the status warnings against a stub `docker`. The live mode brings the same workspace up with `pdv run` and with `./manage.sh run-devenv`, compares the two instances, and tears both down.
 
 ```sh
 ./test/parity.sh                       # offline: plan, services, caps, caches
