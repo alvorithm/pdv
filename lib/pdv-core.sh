@@ -503,7 +503,7 @@ tune_config_js() {
       return 0 ;;
     restorable)
       say "tune: config.js is missing, restoring the instance's snapshot"
-      why "a frontend build deletes resources/public whole, and config.js is gitignored, so nothing else brings it back"
+      why "a frontend build deletes resources/public whole, and config.js is gitignored, so no Penpot step brings it back"
       docker exec "$CTR" cat "$snap" | ctr_write_file "$cfg" \
         || warn "tune: could not restore config.js from $snap"
       return 0 ;;

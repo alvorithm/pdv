@@ -556,7 +556,7 @@ frontend_build() {
   as_penpot "chmod o+w $DEST/frontend/resources/public $DEST/frontend/resources/public/js" \
     || warn "build repair: chmod failed, so the host cannot write into frontend/resources/public/js"
   say "build repair 2/2: config.js"
-  why "the build deleted resources/public whole, and config.js is gitignored, so nothing else brings it back"
+  why "the build deleted resources/public whole, and config.js is gitignored, so no Penpot step brings it back. The tune restores the snapshot if the file is still missing, and keeps a copy written meanwhile"
   tune_config_js
   if [ "$rc" -ne 0 ]; then
     warn "build: ./scripts/build app failed (exit $rc)"
