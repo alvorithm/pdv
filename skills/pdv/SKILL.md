@@ -18,7 +18,7 @@ An instance is a slot `wsN`, and its container is `penpot-devenv-wsN-main`. Slot
 ## Give a worktree its own instance
 
 ```sh
-ln -s ~/Worktrees/penpot-<name> ~/.local/share/penpot-devenv/workspaces/wsN
+ln -sn ~/Worktrees/penpot-<name> ~/.local/share/penpot-devenv/workspaces/wsN
 pdv run --ws N --services backend,frontend
 ```
 

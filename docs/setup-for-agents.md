@@ -115,7 +115,7 @@ A second worktree at the same time wants its own instance. `pdv run --ws 2` acts
 
 ```sh
 mkdir -p ~/.local/share/penpot-devenv/workspaces
-ln -s ~/Worktrees/penpot-other ~/.local/share/penpot-devenv/workspaces/ws2
+ln -sn ~/Worktrees/penpot-other ~/.local/share/penpot-devenv/workspaces/ws2
 ```
 
 A real directory in that slot makes `manage.sh` rsync a copy, and commits made in the copy have to be fetched back.
@@ -232,14 +232,14 @@ pdv carries an agent skill, `skills/pdv/SKILL.md`, with the sequences `pdv help`
 
 ```sh
 mkdir -p ~/.claude/skills ~/.agents/skills
-ln -s ~/Code/pdv/skills/pdv ~/.claude/skills/pdv
-ln -s ~/Code/pdv/skills/pdv ~/.agents/skills/pdv
+ln -sn ~/Code/pdv/skills/pdv ~/.claude/skills/pdv
+ln -sn ~/Code/pdv/skills/pdv ~/.agents/skills/pdv
 head -3 ~/.claude/skills/pdv/SKILL.md ~/.agents/skills/pdv/SKILL.md
 ```
 
 Success: `head` prints `---` and `name: pdv` for each link, which proves the link resolves into the pdv checkout. A `git pull` in `~/Code/pdv` then updates the skill with no further step. A new harness session lists `pdv` among its skills, and in Claude Code `/skills` shows it.
 
-Failure: `File exists` means an older copy or link is there. Inspect it with `ls -l ~/.claude/skills/pdv`, and replace it with `ln -sfn ~/Code/pdv/skills/pdv ~/.claude/skills/pdv` only when it is a link or a copy of this skill. `No such file or directory` from `head` means the clone is elsewhere, so link from the real checkout path.
+Failure: `File exists` means a copy or link is already there. When `~/.claude/skills` and `~/.agents/skills` are the same directory (one links to the other), the second `ln` reports it for the link the first one made, and nothing more is needed. Otherwise inspect it with `ls -l ~/.claude/skills/pdv`, and replace it with `ln -sfn ~/Code/pdv/skills/pdv ~/.claude/skills/pdv` only when it is a link or a copy of this skill. The `-n` matters: without it, `ln` follows an existing link to a directory and creates a stray `pdv` link inside the pdv checkout. `No such file or directory` from `head` means the clone is elsewhere, so link from the real checkout path.
 
 ## 10. Troubleshooting
 

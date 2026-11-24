@@ -21,7 +21,7 @@ The parity harness checks that the arrangement holds.
 Instance ws0 binds the checkout pdv resolves: `--repo`, else `PENPOT_REPO`, else the Penpot worktree you call it from, else `~/Code/penpot`. Instance wsN binds `$PENPOT_WORKSPACES_DIR/wsN`, where the variable defaults to the XDG data directory when the legacy `~/.penpot/penpot_workspaces` does not exist. The slot wants a symlink to the worktree you mean:
 
 ```sh
-ln -s ~/src/penpot-graph ~/.local/share/penpot-devenv/workspaces/ws2
+ln -sn ~/src/penpot-graph ~/.local/share/penpot-devenv/workspaces/ws2
 ```
 
 A real directory in the slot makes `manage.sh` rsync a clone instead, and commits made in the clone have to be fetched back. `pdv run --ws 2` prints which case it found before the container starts.
