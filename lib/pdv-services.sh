@@ -20,6 +20,15 @@ SERVICE_WINDOW_serena="serena"
 
 service_window() { local v="SERVICE_WINDOW_$1"; printf '%s' "${!v}"; }
 
+# The service a window name belongs to; fails for a window pdv did not make.
+window_service() {
+  local s
+  for s in "${PDV_SERVICES[@]}"; do
+    if [ "$(service_window "$s")" = "$1" ]; then printf '%s' "$s"; return 0; fi
+  done
+  return 1
+}
+
 service_panes() {
   case "$1" in
     exporter) printf '2' ;;
@@ -376,4 +385,36 @@ stop_service() {
     $busy || { say "window '$win': stopped"; return 0; }
   done
   warn "window '$win': still busy after C-c twice — inspect it in tmux"
+}
+
+# ------------------------------------------------------------ pane liveness
+# Every pane of a service window that has stopped: an idle shell, or a pane
+# whose process is gone. A stopped watcher is a deliberate `pdv stop`, or it
+# died; either way the UI serves whatever bundle is on disk. One exec per
+# instance, so the busy test (pane_busy's) runs inside the container.
+status_idle_panes() {
+  local name="$1" idx="$2" tree="$3" win pane svc flag="" frontend=false
+  [ "$idx" = 0 ] || flag=" --ws $idx"
+  while IFS='|' read -r win pane; do
+    [ -n "$win" ] || continue
+    svc=$(window_service "$win") || continue
+    subwarn "window '$win' pane $pane is not running anything (stopped with pdv stop, or it died)"
+    imp "start it: pdv start --services $svc$flag"
+  done < <(docker exec "$name" sudo -EH -u penpot bash -c '
+    tmux list-panes -s -t "$1" -F "#{window_name}|#{pane_index}|#{pane_pid}" 2>/dev/null |
+    while IFS="|" read -r w i p; do
+      comm=$(ps -o comm= -p "$p" 2>/dev/null)
+      if [ -z "$comm" ]; then echo "$w|$i"; continue; fi
+      case "$comm" in
+        bash|sh|zsh|dash|fish) [ -n "$(ps --ppid "$p" -o pid= 2>/dev/null)" ] || echo "$w|$i" ;;
+      esac
+    done' _ "$SESSION" 2>/dev/null || true)
+  # No bundle at all costs the whole page, not only live recompiles.
+  if docker exec "$name" sudo -EH -u penpot tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null \
+       | grep -qxF "$(service_window frontend)"; then
+    frontend=true
+  fi
+  if $frontend && [ -n "$tree" ] && [ ! -f "$tree/frontend/resources/public/js/main.js" ]; then
+    subwarn "no frontend bundle on disk: the UI is a blank page until the watcher's first compile lands"
+  fi
 }

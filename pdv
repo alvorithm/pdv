@@ -23,6 +23,7 @@ PDV_SELF=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 . "$PDV_SELF/lib/pdv-core.sh"
 . "$PDV_SELF/lib/pdv-services.sh"
 . "$PDV_SELF/lib/pdv-seed.sh"
+. "$PDV_SELF/lib/pdv-tools.sh"
 
 CALLER_DIR=$PWD
 
@@ -33,8 +34,10 @@ pdv — the Penpot development-environment manager.
 
 Usage: pdv <command> [options]
 
-Every verb accepts --ws N anywhere in its arguments to select the instance
-(default 0), and --repo PATH to name the checkout.
+Every verb accepts --ws N anywhere in its arguments to select the instance,
+and --repo PATH to name the checkout. Without --ws, testjvm, eval, repl,
+lsp, and jobs act on the running instance that serves the worktree you call
+from (exit 3 when none does); every other verb acts on ws0.
 
 Instances
   run     [--services LIST] [--only-backend] [--clean] [--recreate]
@@ -45,6 +48,10 @@ Instances
           Bring a workspace up with the requested service windows.
   start   [--services LIST | --watchers] [--java-opts OPTS] [--clean]
           Start windows of a running instance (or restart stopped ones).
+          A window already running is left alone.
+  restart --services LIST | --watchers  [--java-opts OPTS] [--clean]
+          Stop, then start the named windows of a running instance; waits
+          for the backend's nREPL when backend is among them.
   stop    [--services LIST | --watchers] | [--all]
           Stop service windows of a running instance; without a selector,
           stop the instance itself.
@@ -52,6 +59,20 @@ Instances
   status  Every instance with its state, ports, tree, and window set; a
           broken instance gets its state and a logs tail, never an attach.
   logs    Follow the instance's container log.
+
+Development tools (the instance that serves the caller's worktree)
+  testjvm <start|run|reload|cancel|status|log|stop|restart|repair|cold>
+          A persistent backend test JVM: `run <ns-or-var>…` reloads what
+          changed and runs kaocha. `pdv testjvm help` has the details.
+  eval    [--target test|backend] [--ns NS] [--timeout S] [--no-reload]
+          (<code> | - | --file PATH)
+          Evaluate Clojure in the test JVM (default) or the running
+          backend. `pdv eval --help` has the details.
+  repl    Start cider-nrepl in the backend JVM and bridge it to host port
+          6064 + 10000·N for editors (foreground; needs host python3).
+  lsp     clojure-lsp inside the instance over stdio: an editor's
+          language-server binary.
+  jobs [count]  the instance's newest job-table rows (default 15).
 
 Services (comma list, default: frontend,storybook,exporter,backend,
           plus mcp,serena with --agentic)
@@ -120,6 +141,7 @@ Environment
   PDV_SEED_TIMEOUT        seconds to wait for the backend before a seed
                           gives up (default 900)
   PDV_SEED_DEBUG=1        the seed driver prints each GitHub API call
+  CIDER_NREPL_VERSION     the cider-nrepl release repl loads (default 0.62.2)
   Any PDV_* variable can also live in ${XDG_CONFIG_HOME:-~/.config}/pdv/env,
   one PDV_NAME=value per line (a leading ~/ expands); the environment wins.
 
@@ -478,6 +500,37 @@ cmd_start() {
   start_selected
 }
 
+# ---------------------------------------------------------------- restart
+# A running window is left alone by start, so a restart is a stop followed
+# by a start of the same selection. A backend restart is a full process
+# restart in its window; the wait ends when the new process opens its nREPL.
+cmd_restart() {
+  local selector=false a svc deadline
+  for a in "$@"; do
+    case "$a" in --services|--services=*|--watchers|--only-backend) selector=true ;; esac
+  done
+  $selector || svc_usage "restart: name the windows with --services LIST or --watchers"
+  take_service_flags "$@"
+  [ "${#REST[@]}" -eq 0 ] || svc_usage "restart: unexpected argument '${REST[0]}'"
+  manage_load
+  seed_resolve_selection
+  load_selection
+  require_storybook_pairing
+  container_running "$CTR" || die "restart: $CTR is not running — bring it up with: pdv run --ws $WS_INDEX"
+  has_session || die "restart: $CTR has no tmux session '$SESSION' — bring it up with: pdv run --ws $WS_INDEX"
+  for svc in ${SELECTED[@]+"${SELECTED[@]}"}; do stop_service "$svc"; done
+  start_selected
+  if in_selection backend; then
+    say "waiting for the backend nREPL on port 6064 in $CTR (≤300 s)"
+    deadline=$(( SECONDS + 300 ))
+    until docker exec "$CTR" bash -c 'exec 3<>/dev/tcp/127.0.0.1/6064' 2>/dev/null; do
+      [ "$SECONDS" -lt "$deadline" ] || die "restart: the backend did not open its nREPL within 300 s; inspect the window: pdv attach --ws $WS_INDEX"
+      sleep 3
+    done
+    say "backend is up"
+  fi
+}
+
 # ------------------------------------------------------------------- stop
 cmd_stop() {
   local selector=false all=false a
@@ -541,7 +594,7 @@ cmd_status() {
 }
 
 status_instance() {
-  local idx="$1" name="penpot-devenv-ws$1-main" state running tree branch session windows broken="" reason=""
+  local idx="$1" name="penpot-devenv-ws$1-main" state running tree served branch session windows broken="" reason=""
   state=$(container_state "$name")
   if [ -z "$state" ]; then
     warn "$name: no such container"
@@ -553,11 +606,15 @@ status_instance() {
   sub "ports:   $(published_ports "$name" | tr '\n' ' ')"
   tree=$(mount_src "$name")
   sub "tree:    ${tree:-<none>}"
-  if [ -n "$tree" ] && [ -d "$tree" ]; then
-    branch=$(git -C "$tree" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
+  served="$tree"
+  if [ "$running" = "true" ] && [ -n "$tree" ]; then
+    status_served_tree "$name" "$tree" "$idx"
+  fi
+  if [ -n "$served" ] && [ -d "$served" ]; then
+    branch=$(git -C "$served" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
     sub "branch:  $branch"
   fi
-  seed_instance_line "$tree"
+  seed_instance_line "$served"
   if [ "$running" != "true" ]; then
     if stopped_cleanly "$name"; then
       # Stopped outside pdv (a daemon restart, a host shutdown): nothing is
@@ -572,6 +629,7 @@ status_instance() {
       windows=$(docker exec "$name" sudo -EH -u penpot tmux list-windows -t "$SESSION" \
                   -F '#{window_index}:#{window_name}(#{window_panes})' 2>/dev/null | sort -n | tr '\n' ' ')
       sub "windows: $windows"
+      status_idle_panes "$name" "$idx" "$served"
     else
       broken=true; reason="main container is running but the tmux session '$SESSION' is gone"
     fi
@@ -654,6 +712,7 @@ main() {
     help|-h|--help) usage ;;
     run)            cmd_run ${REST[@]+"${REST[@]}"} ;;
     start)          cmd_start ${REST[@]+"${REST[@]}"} ;;
+    restart)        cmd_restart ${REST[@]+"${REST[@]}"} ;;
     stop)           cmd_stop ${REST[@]+"${REST[@]}"} ;;
     attach)         manage_load; exec "$ROOT/manage.sh" attach-devenv --ws "$WS_INDEX" ;;
     logs)           manage_load; exec "$ROOT/manage.sh" log-devenv --ws "$WS_INDEX" ;;
@@ -663,6 +722,11 @@ main() {
     plan)           cmd_plan ${REST[@]+"${REST[@]}"} ;;
     acl)            cmd_acl ;;
     tune)           cmd_tune ;;
+    testjvm)        cmd_testjvm ${REST[@]+"${REST[@]}"} ;;
+    eval)           cmd_eval ${REST[@]+"${REST[@]}"} ;;
+    repl)           cmd_repl ;;
+    lsp)            cmd_lsp ;;
+    jobs)           cmd_jobs ;;
     *)              manage_load; exec "$ROOT/manage.sh" ${original[@]+"${original[@]}"} ;;
   esac
 }

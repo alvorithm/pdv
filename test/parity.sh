@@ -357,6 +357,157 @@ check_shared_infra_mode() {
   fi
 }
 
+# A stub docker on PATH: `inspect` prints the lines of $PARITY_INSPECT (what
+# a real inspect prints for the running instances), and every call is
+# appended to $PARITY_CALLS, so a check can prove which calls happened.
+make_docker_stub() {
+  local dir="$1"
+  cat >"$dir/docker" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$PARITY_CALLS"
+case "$1" in
+  inspect) [ -f "$PARITY_INSPECT" ] && cat "$PARITY_INSPECT" ;;
+esac
+exit 0
+EOF
+  chmod +x "$dir/docker"
+}
+
+# Bad usage exits before any instance lookup, so a typo never waits on, or
+# acts on, an instance.
+check_tools_usage() {
+  local stub out rc want got="" line
+  stub=$(mktemp -d "${TMPDIR:-/tmp}/parity-tools.XXXXXX")
+  make_docker_stub "$stub"
+  : >"$stub/calls"
+  want="testjvm bogus:64|testjvm run 1bad:64|testjvm run --seed x:64|testjvm stop --now:64|testjvm log 0:64|eval:64|eval --timeout 0 x:64|eval --target prod x:64|jobs many:2|repl extra:2|lsp extra:2|restart:2"
+  while IFS= read -r line; do
+    # shellcheck disable=SC2086 # each case is a word list
+    ( cd "$stub" && PARITY_CALLS="$stub/calls" PATH="$stub:$PATH" "$PDV" $line --repo "$ROOT" ) >/dev/null 2>&1; rc=$?
+    got+="${got:+|}$line:$rc"
+  done < <(printf '%s\n' "$want" | tr '|' '\n' | sed 's/:[0-9]*$//')
+  if [ "$got" = "$want" ]; then
+    ok "testjvm, eval, jobs, repl, lsp and restart refuse bad usage with their documented status"
+  else
+    bad "bad-usage exit statuses differ"
+    printf '     want: %s\n     got:  %s\n' "$want" "$got"
+  fi
+  if [ -s "$stub/calls" ]; then
+    bad "bad usage reached docker: $(tr '\n' ';' <"$stub/calls")"
+  else
+    ok "bad usage exits before any docker call"
+  fi
+  rm -rf "$stub"
+}
+
+# Without --ws, the tools act on the running instance whose bind mount
+# resolves to the caller's worktree, and name it on their first stdout line.
+check_caller_selection() {
+  local tmp out err rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/parity-select.XXXXXX")
+  make_docker_stub "$tmp"
+  git init -q "$tmp/wt" && mkdir -p "$tmp/wt/sub" "$tmp/other"
+  ln -s "$tmp/wt" "$tmp/slot"
+  printf '/penpot-devenv-ws0-main true %s\n/penpot-devenv-ws2-main true %s\n' "$tmp/other" "$tmp/slot" >"$tmp/inspect"
+  export PARITY_INSPECT="$tmp/inspect" PARITY_CALLS="$tmp/calls"
+  out=$( cd "$tmp/wt/sub" && PATH="$tmp:$PATH" "$PDV" testjvm log --repo "$ROOT" 2>/dev/null ); rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(printf '%s\n' "$out" | head -1)" = "[pdv] instance: penpot-devenv-ws2-main  (worktree: $tmp/slot)" ]; then
+    ok "the caller's worktree selects the instance that binds it, through a slot symlink, and the banner names it"
+  else
+    bad "worktree selection or banner differs (rc=$rc): $(printf '%s' "$out" | head -1)"
+  fi
+  if grep -q '^exec penpot-devenv-ws2-main tail' "$tmp/calls"; then
+    ok "the selected instance is the one the verb acts on"
+  else
+    bad "testjvm log did not act on ws2: $(tr '\n' ';' <"$tmp/calls")"
+  fi
+  err=$( cd "$tmp" && PATH="$tmp:$PATH" "$PDV" eval --target backend '(+ 1 2)' --repo "$ROOT" 2>&1 >/dev/null ); rc=$?
+  if [ "$rc" -eq 3 ] && printf '%s' "$err" | grep -qF "penpot-devenv-ws2-main serves $tmp/wt"; then
+    ok "no instance serving the caller's directory exits 3 and lists what each running instance serves"
+  else
+    bad "an unserved caller did not exit 3 with the list (rc=$rc): $err"
+  fi
+  out=$( cd "$tmp/wt" && PATH="$tmp:$PATH" "$PDV" testjvm log --ws 0 --repo "$ROOT" 2>/dev/null ); rc=$?
+  if [ "$rc" -eq 3 ]; then
+    ok "--ws N picks an instance whatever the caller's worktree, and exits 3 when it does not run"
+  else
+    bad "--ws 0 against a stub with no running ws0 did not exit 3 (rc=$rc)"
+  fi
+  unset PARITY_INSPECT PARITY_CALLS
+  rm -rf "$tmp"
+}
+
+# The staleness guard compares the JVM's PENPOT_TESTJVM_SHA with pdv's own
+# share/testjvm.clj, and focus ids never become code.
+check_testjvm_forms() {
+  local lib got sha
+  lib="PDV_SELF='$SELF/..'; DEST=/home/penpot/penpot; source '$SELF/../lib/pdv-core.sh'; source '$SELF/../lib/pdv-tools.sh'"
+  sha=$(sha256sum "$SELF/../share/testjvm.clj"); sha="${sha%% *}"
+  got=$(bash -c "$lib; testjvm_guard '(f)'" 2>/dev/null)
+  if [ "$got" = "(if (= (System/getenv \"PENPOT_TESTJVM_SHA\") \"$sha\") (f) (do (println \"[testjvm] restart needed: the test JVM runs an older testjvm.clj\") 5))" ]; then
+    ok "the staleness guard carries the sha of pdv's share/testjvm.clj"
+  else
+    bad "the staleness guard differs: $got"
+  fi
+  got=$(bash -c "$lib; tj_focus_forms backend-tests.rpc-doc-test ':unit' 'a.b/c-test'" 2>/dev/null)
+  if [ "$got" = " 'backend-tests.rpc-doc-test :unit 'a.b/c-test" ]; then
+    ok "focus ids become quoted symbols and keywords"
+  else
+    bad "focus forms differ: $got"
+  fi
+  if bash -c "$lib; tj_focus_forms '(System/exit 0)'" >/dev/null 2>&1; then
+    bad "a focus id carrying code must be refused"
+  else
+    ok "a focus id carrying code is refused"
+  fi
+}
+
+# Status finds the tree a container really serves by device and inode, and
+# warns when the recorded source or the compose label has moved on.
+check_status_served() {
+  local tmp lib out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/parity-served.XXXXXX")
+  mkdir -p "$tmp/a" "$tmp/b" "$tmp/ws"
+  ln -s "$tmp/b" "$tmp/ws/ws1"
+  ln -s "$tmp/a" "$tmp/ws/ws2"
+  # docker is a function here: exec answers the inode of $SEES, inspect the label.
+  lib="source '$SELF/../lib/pdv-core.sh'; ROOT='$tmp'; PENPOT_WORKSPACES_DIR='$tmp/ws'
+       docker() { case \"\$1\" in exec) stat -c '%d:%i' \"\$SEES\" ;; inspect) printf '%s' \"\$LABEL\" ;; esac; }"
+  out=$(SEES="$tmp/a" LABEL="$tmp/ws/ws2/docker/devenv" bash -c "$lib; status_served_tree c '$tmp/ws/ws2' 2; echo \"served=\$served\"" 2>&1)
+  if [ "$out" = "served=$tmp/a" ]; then
+    ok "status: a bind that still matches its source prints no warning"
+  else
+    bad "status warned on a current bind: $out"
+  fi
+  out=$(SEES="$tmp/a" LABEL="$tmp/ws/ws2/docker/devenv" bash -c "$lib; status_served_tree c '$tmp/ws/ws1' 1" 2>&1)
+  if printf '%s' "$out" | grep -qF "serves $tmp/a, but its mount source now resolves to $tmp/b"; then
+    ok "status: a slot repointed after the bind is named, with the tree still served"
+  else
+    bad "status missed a repointed slot: $out"
+  fi
+  out=$(SEES="$tmp/a" LABEL="$tmp/ws/ws2/docker/devenv" bash -c "$lib; status_served_tree c '$tmp/gone' 3" 2>&1)
+  if printf '%s' "$out" | grep -qF "recorded mount source no longer exists" && printf '%s' "$out" | grep -qF "still serves $tmp/a"; then
+    ok "status: a renamed tree is named, with the tree still served"
+  else
+    bad "status missed a renamed tree: $out"
+  fi
+  out=$(SEES="$tmp/a" LABEL="$tmp/b/docker/devenv" bash -c "$lib; status_served_tree c '$tmp/ws/ws2' 2" 2>&1)
+  if printf '%s' "$out" | grep -qF "compose working_dir label names $tmp/b, which is stale"; then
+    ok "status: a stale compose working_dir label is named"
+  else
+    bad "status missed a stale label: $out"
+  fi
+  rm -rf "$tmp"
+  out=$(bash -c "source '$SELF/../lib/pdv-core.sh'; source '$SELF/../lib/pdv-services.sh'
+         for w in 'frontend watch' 'frontend storybook' exporter backend mcp serena; do printf '%s,' \"\$(window_service \"\$w\")\"; done
+         window_service other || printf 'none'" 2>/dev/null)
+  if [ "$out" = "frontend,storybook,exporter,backend,mcp,serena,none" ]; then
+    ok "status: every window maps back to the service that starts it"
+  else
+    bad "window_service differs: $out"
+  fi
+}
+
 # --------------------------------------------------------------- live checks
 CTR_FOR() { printf 'penpot-devenv-ws%s-main' "$1"; }
 
@@ -579,6 +730,10 @@ if [ "$MODE" = "offline" ]; then
   check_seed_names
   check_status_empty_rootful
   check_shared_infra_mode
+  check_tools_usage
+  check_caller_selection
+  check_testjvm_forms
+  check_status_served
 else
   IFS=',' read -ra WS_LIST <<<"$WSD"
   for n in "${WS_LIST[@]}"; do

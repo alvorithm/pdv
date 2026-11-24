@@ -76,6 +76,7 @@ parse_instance() {
   local max
   max=$(sed -n 's/^PENPOT_MAX_WS_INDEX=\([0-9][0-9]*\).*/\1/p' "$ROOT/manage.sh" | head -1)
   max="${max:-5}"
+  WS_MAX="$max"
   if $WS_GIVEN; then
     case "$value" in
       ''|*[!0-9]*)
@@ -263,6 +264,65 @@ the network). compose reuses the container by name, so a plain start keeps
 re-launching the same networkless zombie.
 [pdv] escape hatch: pdv run --ws $idx --recreate   (removes the container, keeps every volume)
 EOF
+}
+
+# ------------------------------------------------------- what is served
+# Warnings inside an instance block indent with the detail lines.
+subwarn() { printf '  WARNING: %s\n' "$*" >&2; }
+
+# The tree a container really serves. The mount source and the compose
+# working_dir label are snapshots taken when the container was created, so a
+# worktree rename or a symlink repoint leaves them naming a path the bind
+# left long ago. The device and inode the container sees at the mount point
+# are matched against the host paths the bind could have come from: the
+# recorded source and its target, the workspace slots and their targets, and
+# every worktree of the checkout. Sets `served`; warns when the recorded
+# source no longer leads there, or when the label is stale.
+status_served_tree() {
+  local name="$1" src="$2" idx="$3" cinode cand h rt label hint
+  hint="recreate the container to rebind it: pdv run --ws $idx --recreate (volumes stay)"
+  served=""
+  cinode=$(docker exec "$name" stat -c '%d:%i' "$DEST" 2>/dev/null || true)
+  if [ -n "$cinode" ]; then
+    while IFS= read -r cand; do
+      [ -n "$cand" ] && [ -d "$cand" ] || continue
+      h=$(stat -L -c '%d:%i' "$cand" 2>/dev/null) || continue
+      if [ "$h" = "$cinode" ]; then served=$(readlink -f "$cand"); break; fi
+    done < <(status_bind_candidates "$src")
+  fi
+  if [ -z "$served" ]; then
+    subwarn "no host path matches what the container sees at $DEST, so the tree it serves is unknown"
+    imp "$hint"
+    served="$src"
+    return 0
+  fi
+  if [ ! -e "$src" ]; then
+    subwarn "the recorded mount source no longer exists: the tree was renamed or the slot repointed after the container started; it still serves $served"
+    imp "$hint"
+  else
+    rt=$(readlink -f "$src" 2>/dev/null || true)
+    if [ -n "$rt" ] && [ "$rt" != "$served" ]; then
+      subwarn "the container serves $served, but its mount source now resolves to $rt"
+      why "a bind keeps the directory it was made from; renames and symlink repoints do not move it"
+      imp "$hint"
+    fi
+  fi
+  [ "$served" = "$(readlink -f "$src" 2>/dev/null)" ] || sub "serves:  $served"
+  label=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$name" 2>/dev/null || true)
+  label="${label%/docker/devenv}"
+  if [ -n "$label" ] && [ "$(readlink -f "$label" 2>/dev/null)" != "$served" ]; then
+    subwarn "the compose working_dir label names $label, which is stale: labels are written only when the container is created"
+    imp "cosmetic; the next --recreate refreshes it"
+  fi
+}
+
+status_bind_candidates() {
+  local d
+  printf '%s\n' "$1"
+  for d in "${PENPOT_WORKSPACES_DIR:-}"/*/; do
+    [ -e "$d" ] && printf '%s\n' "${d%/}"
+  done
+  git -C "$ROOT" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p'
 }
 
 # -------------------------------------------------------------------- tmux
